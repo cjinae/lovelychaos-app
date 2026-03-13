@@ -1,5 +1,6 @@
 from collections.abc import Generator
 import os
+from pathlib import Path
 import tempfile
 
 from alembic import command
@@ -15,6 +16,8 @@ from app.services.calendar import MockCalendarProvider
 from app.services.llm import MockDecisionEngine
 from app.services.notifications import MockNotificationProvider
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 
 @pytest.fixture
 def session_factory() -> Generator[sessionmaker, None, None]:
@@ -26,8 +29,8 @@ def session_factory() -> Generator[sessionmaker, None, None]:
         connect_args={"check_same_thread": False},
     )
     TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
-    alembic_cfg = Config(os.path.join(os.getcwd(), "alembic.ini"))
-    alembic_cfg.set_main_option("script_location", os.path.join(os.getcwd(), "alembic"))
+    alembic_cfg = Config(str(REPO_ROOT / "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
     alembic_cfg.set_main_option("sqlalchemy.url", f"sqlite:///{path}")
     command.upgrade(alembic_cfg, "head")
     with TestingSessionLocal() as db:
