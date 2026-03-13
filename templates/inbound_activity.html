@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+
+{% block title %}LovelyChaos Inbound Activity{% endblock %}
+
+{% block hero %}
+  <section class="lc-hero lc-hero--compact">
+    <div class="lc-hero__copy">
+      <p class="lc-eyebrow">Operational Visibility</p>
+      <h1 class="lc-display">Inbound activity in the same voice as the product.</h1>
+      <p class="lc-lead">Tables are still tables, but they now live inside the shared LovelyChaos system: warm surfaces, serif framing, quiet borders, and clearer status hierarchy.</p>
+    </div>
+    <div class="lc-hero__aside">
+      <a class="lc-button" href="/admin">Back to admin</a>
+      <span class="lc-pill">{{ limit }} latest records</span>
+    </div>
+  </section>
+{% endblock %}
+
+{% block page %}
+  <section class="lc-grid lc-grid--three">
+    <article class="lc-stat">
+      <p class="lc-stat__value">{{ receipts|length }}</p>
+      <p class="lc-stat__label">Webhook receipts included in this slice.</p>
+    </article>
+    <article class="lc-stat">
+      <p class="lc-stat__value">{{ events|length }}</p>
+      <p class="lc-stat__label">Events shown across parsed and committed outcomes.</p>
+    </article>
+    <article class="lc-stat">
+      <p class="lc-stat__value">{{ decision_audits|length }}</p>
+      <p class="lc-stat__label">Decision audits available for traceability review.</p>
+    </article>
+  </section>
+
+  <section class="lc-stack" style="margin-top: 24px;">
+    <article class="lc-table-card">
+      <div class="lc-table-card__head">
+        <div>
+          <p class="lc-eyebrow">Receipts</p>
+          <h2 class="lc-card__title lc-card__title--sm">Webhook receipts</h2>
+        </div>
+        <p class="lc-subtle">Provider ingress and receipt status for the latest records.</p>
+      </div>
+      <div class="lc-table-card__content">
+        <table class="lc-data-table">
+          <thead>
+            <tr>
+              <th>ID</th><th>Provider</th><th>Event ID</th><th>Message ID</th><th>Status</th><th>Received</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in receipts %}
+              <tr>
+                <td>{{ r.id }}</td>
+                <td>{{ r.provider }}</td>
+                <td class="lc-mono">{{ r.provider_event_id }}</td>
+                <td class="lc-mono">{{ r.provider_message_id }}</td>
+                <td>{{ r.status }}</td>
+                <td>{{ r.received_at }}</td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="6">No webhook receipts available.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="lc-table-card">
+      <div class="lc-table-card__head">
+        <div>
+          <p class="lc-eyebrow">Messages</p>
+          <h2 class="lc-card__title lc-card__title--sm">Source messages</h2>
+        </div>
+        <p class="lc-subtle">Original provider metadata and inbound email context.</p>
+      </div>
+      <div class="lc-table-card__content">
+        <table class="lc-data-table">
+          <thead>
+            <tr>
+              <th>ID</th><th>Provider</th><th>Message ID</th><th>Sender</th><th>Subject</th><th>Received</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for m in messages %}
+              <tr>
+                <td>{{ m.id }}</td>
+                <td>{{ m.provider }}</td>
+                <td class="lc-mono">{{ m.provider_message_id }}</td>
+                <td>{{ m.sender }}</td>
+                <td>{{ m.subject }}</td>
+                <td>{{ m.received_at }}</td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="6">No source messages available.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="lc-table-card">
+      <div class="lc-table-card__head">
+        <div>
+          <p class="lc-eyebrow">Events</p>
+          <h2 class="lc-card__title lc-card__title--sm">Committed events</h2>
+        </div>
+        <p class="lc-subtle">Calendar-bound outcomes after validation and routing.</p>
+      </div>
+      <div class="lc-table-card__content">
+        <table class="lc-data-table">
+          <thead>
+            <tr>
+              <th>ID</th><th>Source Msg</th><th>Title</th><th>Status</th><th>Calendar Event ID</th><th>Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for e in events %}
+              <tr>
+                <td>{{ e.id }}</td>
+                <td>{{ e.source_message_id }}</td>
+                <td>{{ e.title }}</td>
+                <td>{{ e.status }}</td>
+                <td class="lc-mono">{{ e.calendar_event_id }}</td>
+                <td>{{ e.updated_at }}</td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="6">No committed events available.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="lc-table-card">
+      <div class="lc-table-card__head">
+        <div>
+          <p class="lc-eyebrow">Topics</p>
+          <h2 class="lc-card__title lc-card__title--sm">Informational items</h2>
+        </div>
+        <p class="lc-subtle">Condensed topics that were captured for summary and future follow-up.</p>
+      </div>
+      <div class="lc-table-card__content">
+        <table class="lc-data-table">
+          <thead>
+            <tr>
+              <th>ID</th><th>Source Msg</th><th>Title</th><th>Priority</th><th>Status</th><th>Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in informational_items %}
+              <tr>
+                <td>{{ item.id }}</td>
+                <td>{{ item.source_message_id }}</td>
+                <td>{{ item.title }}</td>
+                <td>{{ item.priority }}</td>
+                <td>{{ item.status }}</td>
+                <td>{{ item.created_at }}</td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="6">No informational items available.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="lc-table-card">
+      <div class="lc-table-card__head">
+        <div>
+          <p class="lc-eyebrow">Audits</p>
+          <h2 class="lc-card__title lc-card__title--sm">Decision audits</h2>
+        </div>
+        <p class="lc-subtle">Trace policy outcomes and committed actions for debugging and review.</p>
+      </div>
+      <div class="lc-table-card__content">
+        <table class="lc-data-table">
+          <thead>
+            <tr>
+              <th>ID</th><th>Request ID</th><th>Policy Outcome</th><th>Committed Actions</th><th>Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for a in decision_audits %}
+              <tr>
+                <td>{{ a.id }}</td>
+                <td class="lc-mono">{{ a.request_id }}</td>
+                <td class="lc-mono">{{ a.policy_outcome }}</td>
+                <td class="lc-mono">{{ a.committed_actions }}</td>
+                <td>{{ a.created_at }}</td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="5">No decision audits available.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+{% endblock %}

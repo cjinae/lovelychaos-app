@@ -1,0 +1,259 @@
+# LovelyChaos Product Spec
+
+## Summary
+LovelyChaos is a school-to-parent assistant that turns newsletters, school emails, links, and attachments into a short, personalized update plus conversational follow-up.
+
+The product goal is not “route everything into internal buckets.” The product goal is:
+1. Surface what matters for this family.
+2. Keep the summary brief enough to read in one pass.
+3. Let the parent naturally ask for the next step.
+
+The assistant uses an LLM-first interpretation layer and deterministic Python for validation, attribution, storage, and side effects.
+
+## Core Experience
+
+### Inbound sources
+1. Email
+2. SMS
+
+### Supported inbound content
+1. Plain text emails
+2. SMS messages
+3. Forwarded school emails
+4. Attachments, especially PDFs
+5. Supported links, especially SchoolMessenger document links
+
+### Parent-facing output
+Every inbound school update should resolve to a concise summary with this shape:
+
+1. `Important Dates`
+2. `Important Items`
+3. `Other Logistics / Topics Mentioned`
+4. Closing CTA:
+   `Let me know if you want me to add any of these to the calendar or want more info on any topic mentioned.`
+
+The output should be:
+1. Brief
+2. Deduplicated
+3. Household-specific
+4. Free of filler, greetings, and internal system language
+
+Do not expose:
+1. Batch A/B/C
+2. Pending review
+3. Execution disposition
+4. Confirm/reject language
+
+## Priority Model
+
+### Hybrid priority model
+LovelyChaos uses two explicit priority sources:
+
+1. System Default Priorities
+2. User Priorities
+
+These are matched deterministically first, then consolidated by the LLM into one parent-facing judgment.
+
+### System Default Priorities
+These are enabled by default unless the parent turns them off:
+
+1. `school_closures`
+   Examples:
+   - PA Day
+   - March Break
+   - Winter Break
+   - Stat holiday where school is closed
+
+2. `grade_relevant`
+   Examples:
+   - Grade-specific events for the household’s children
+   - Child-specific activities
+   - Classroom or grade logistics directly tied to the children in the household
+
+### User Priorities
+The parent can define their own priority topics during onboarding and later in admin.
+
+Examples:
+1. Pizza Day
+2. Swim
+3. School Council
+4. Camp
+5. Science Club
+
+User priorities are stored as:
+1. Normalized topic list
+2. Raw free-text preference notes
+
+### Consolidated priority output
+For each item, LovelyChaos should preserve:
+1. `matched_system_defaults`
+2. `matched_user_priorities`
+3. `consolidated_priority`
+
+Allowed consolidated values:
+1. `important`
+2. `mentioned`
+3. `ignore`
+
+## Onboarding and Admin
+
+### Family setup
+The primary parent flow is:
+1. Connect Google Calendar
+2. Add children
+3. Enter school names
+4. Enter custom priority topics / notes
+5. Review system defaults and toggle them on or off
+
+### School handling
+1. School search should autocomplete GTA schools.
+2. Household timezone should default from the selected school.
+3. If the school is not in the GTA directory, look up the school location and derive the timezone.
+
+### Admin surfaces
+The admin should expose:
+1. Family profile
+2. Children and schools
+3. System default priority toggles
+4. User priority topics
+5. Raw preference notes
+6. Calendar binding
+7. Inbound activity and audits
+
+The admin should not present pending review or confirm/reject as part of the product experience.
+
+## Conversational Follow-Up
+
+### Supported follow-up intents
+Near-term supported follow-up concepts are:
+1. `add`
+2. `more_info`
+3. `delete`
+4. `remind`
+
+`confirm` and `reject` are not part of the intended product model.
+
+### Expected future behavior
+Examples:
+1. Parent says: `add that to the calendar`
+   - LovelyChaos uses an add-to-calendar tool
+
+2. Parent says: `give me more info about Space Pirates musical`
+   - LovelyChaos uses a topic drill-down tool against the original source content
+
+3. Parent says: `delete event 14`
+   - LovelyChaos removes the calendar event if authorized and resolvable
+
+4. Parent says: `remind me 30m before`
+   - LovelyChaos creates an SMS or calendar reminder
+
+### Topic follow-up requirement
+The system must retain enough source provenance so a later `more_info` tool can:
+1. Locate the original inbound message
+2. Locate any downloaded attachment text
+3. Locate extracted sections relevant to a named topic
+4. Return a concise topic-specific explanation
+
+## Summarization Rules
+
+### Multi-step refinement
+The summary pipeline should use:
+1. Deterministic relevance prefilter
+2. Persona-based extraction
+3. Brevity compression
+
+### Household filter
+The summary should be filtered through:
+1. Household children
+2. Child grades
+3. School names
+4. Enabled system defaults
+5. User priority topics
+6. Household timezone
+
+### Rendering rules
+1. Put dated important items in `Important Dates`
+2. Put undated important items in `Important Items`
+3. Put compressed mentions in `Other Logistics / Topics Mentioned`
+4. No duplication across sections
+5. Date-first wording when possible
+6. Grade or child qualifiers only when they materially improve relevance
+7. Awareness/admin items should be compressed to topic-like mentions, not prose
+
+## SchoolMessenger requirements
+
+When a SchoolMessenger link is present, LovelyChaos must attempt deterministic document retrieval before giving up.
+
+### Supported pattern
+1. Detect SchoolMessenger tracked or hosted links in the email body
+2. Follow the tracked redirect when needed
+3. Parse `message-link-code` and `attachment-link-code` when present
+4. POST to the SchoolMessenger document endpoint
+5. Accept direct PDF download as success
+6. Extract text from the downloaded PDF
+
+### Preferred PDF extraction stack
+1. PyMuPDF first
+2. pdfplumber / pypdf fallback
+3. Other lightweight parser fallback if needed
+4. OCR only when extracted text quality is too weak
+
+### Processing rules
+1. Merge body text and attachment text into one normalized analysis payload
+2. Remove forwarding boilerplate, tracking noise, and footer junk
+3. Preserve forwarded metadata when it gives valid date/year context
+4. Use section-aware prioritization before LLM extraction
+
+### Failure behavior
+1. If SchoolMessenger retrieval fails, continue with body-only processing
+2. Do not reject the message only because a link failed
+3. Record enough diagnostics to debug the failure later
+
+## Data and Storage Principles
+
+### Core persisted objects
+1. Household
+2. User
+3. Child
+4. PreferenceProfile
+5. PreferenceRule
+6. SourceMessage
+7. WebhookReceipt
+8. Event
+9. InformationalItem
+10. Reminder
+11. DecisionAudit
+12. IdempotencyKey
+
+### Internal scaffolding
+Some temporary internal state may still exist to support fallback behavior during the transition to full conversational tools.
+
+That scaffolding is:
+1. Not part of the user-facing product model
+2. Not part of the summary language
+3. Not something the parent should have to reason about
+
+## Safety and Reliability
+
+### Tenant isolation
+1. Inbound sender attribution must resolve to exactly one verified admin for a household
+2. Ambiguous or unresolved attribution must fail closed
+3. Every mutating action must pass a final tenant consistency gate before commit
+
+### Validation
+Deterministic validation must reject or downgrade:
+1. Invalid timestamps
+2. Malformed temporal ranges
+3. Unsupported or ambiguous calendar mutations
+4. Unsafe cross-tenant references
+
+### Idempotency
+1. Provider retries must not create duplicate state
+2. Duplicate calendar writes must be blocked
+3. Semantically identical titles/date ranges should be normalized for dedupe where possible
+
+## Non-Goals for this phase
+1. Full agentic tool orchestration for topic drill-down
+2. Automatic multi-parent collaborative editing
+3. Automatic cross-channel conversational handoff
+4. Exposing internal review queues as part of the parent experience

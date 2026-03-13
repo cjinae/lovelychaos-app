@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+
+{% block title %}LovelyChaos Design Language{% endblock %}
+
+{% block hero %}
+  <section class="lc-hero">
+    <div class="lc-hero__copy">
+      <p class="lc-eyebrow">Living System</p>
+      <h1 class="lc-display">Design language for the rest of LovelyChaos.</h1>
+      <p class="lc-lead">This system is pulled from the current public site: warm parchment backgrounds, serif-led headlines, restrained coral accents, and operational UI that still feels editorial rather than administrative.</p>
+      <div class="lc-pill-row">
+        <span class="lc-pill lc-pill--accent">Playfair + DM Sans</span>
+        <span class="lc-pill">Warm neutral surfaces</span>
+        <span class="lc-pill">Coral action accent</span>
+      </div>
+    </div>
+    <div class="lc-hero__aside">
+      <a class="lc-button" href="/onboarding">See it in onboarding</a>
+      <a class="lc-button lc-button--secondary" href="/admin">See it in admin</a>
+    </div>
+  </section>
+{% endblock %}
+
+{% block page %}
+  <section class="lc-grid lc-grid--three" aria-label="Principles">
+    <article class="lc-card lc-card--tint">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">01</p>
+        <h2 class="lc-card__title lc-card__title--sm">Calm, not clinical</h2>
+      </div>
+      <p class="lc-card__copy">Internal tools should inherit the same softness as the marketing site. Use warm neutrals, large breathing room, and avoid dashboard-grey defaults.</p>
+    </article>
+    <article class="lc-card lc-card--tint">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">02</p>
+        <h2 class="lc-card__title lc-card__title--sm">Editorial hierarchy</h2>
+      </div>
+      <p class="lc-card__copy">Use serif for moments of meaning: page titles, section headlines, metrics. Use DM Sans for controls, body copy, labels, and tables.</p>
+    </article>
+    <article class="lc-card lc-card--tint">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">03</p>
+        <h2 class="lc-card__title lc-card__title--sm">Signal with restraint</h2>
+      </div>
+      <p class="lc-card__copy">Coral is the only hot color. Reserve it for actions, status emphasis, and small moments of guidance so the interface keeps its composure.</p>
+    </article>
+  </section>
+
+  <section class="lc-stack" style="margin-top: 32px;">
+    <article class="lc-card">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">Palette</p>
+        <h2 class="lc-section-title">Color tokens</h2>
+        <p class="lc-intro">Use semantic tokens instead of hard-coded colors. These are lifted from the public site stylesheet, then extended for app states.</p>
+      </div>
+      <div class="lc-grid lc-grid--auto">
+        <div class="lc-token">
+          <div class="lc-token__swatch" style="background: var(--lc-bg);"></div>
+          <h3 class="lc-token__value">Canvas</h3>
+          <p class="lc-token__meta">`--lc-bg`<br />Warm parchment page background.</p>
+        </div>
+        <div class="lc-token">
+          <div class="lc-token__swatch" style="background: var(--lc-surface);"></div>
+          <h3 class="lc-token__value">Surface</h3>
+          <p class="lc-token__meta">`--lc-surface`<br />Primary cards, forms, and panels.</p>
+        </div>
+        <div class="lc-token">
+          <div class="lc-token__swatch" style="background: var(--lc-ink);"></div>
+          <h3 class="lc-token__value" style="color: var(--lc-ink);">Ink</h3>
+          <p class="lc-token__meta">`--lc-ink`<br />Headlines, buttons, primary text.</p>
+        </div>
+        <div class="lc-token">
+          <div class="lc-token__swatch" style="background: var(--lc-accent);"></div>
+          <h3 class="lc-token__value">Accent</h3>
+          <p class="lc-token__meta">`--lc-accent`<br />Calls to action, focus, emphasis.</p>
+        </div>
+        <div class="lc-token">
+          <div class="lc-token__swatch" style="background: var(--lc-success);"></div>
+          <h3 class="lc-token__value">Success</h3>
+          <p class="lc-token__meta">`--lc-success`<br />Confirmed, synced, healthy states.</p>
+        </div>
+        <div class="lc-token">
+          <div class="lc-token__swatch" style="background: var(--lc-warn);"></div>
+          <h3 class="lc-token__value">Warning</h3>
+          <p class="lc-token__meta">`--lc-warn`<br />Pending review and cautionary states.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="lc-card">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">Typography</p>
+        <h2 class="lc-section-title">Use contrast, not clutter</h2>
+      </div>
+      <div class="lc-grid lc-grid--two">
+        <div class="lc-specimen">
+          <p class="lc-specimen__caps">Display / Playfair Display</p>
+          <p class="lc-specimen__display">Ready to make chaos simple?</p>
+          <p class="lc-specimen__body">Serif headlines make the product feel human and premium. Keep them short. They should frame the page, not describe every detail.</p>
+        </div>
+        <div class="lc-specimen">
+          <p class="lc-specimen__caps">Body / DM Sans</p>
+          <p class="lc-specimen__body">Use DM Sans for everything operational: table headers, form labels, helper text, and navigation. It keeps the product readable when the content gets dense.</p>
+          <p class="lc-specimen__body">Uppercase labels should be brief and letter-spaced. Body copy should be airy, around `1.6` to `1.8` line height.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="lc-card">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">Primitives</p>
+        <h2 class="lc-section-title">Reusable building blocks</h2>
+      </div>
+      <div class="lc-grid lc-grid--two">
+        <div class="lc-stack">
+          <div class="lc-inline-actions">
+            <a class="lc-button" href="#0">Primary action</a>
+            <a class="lc-button lc-button--secondary" href="#0">Secondary action</a>
+            <a class="lc-button lc-button--ghost" href="#0">Quiet action</a>
+          </div>
+          <div class="lc-pill-row">
+            <span class="lc-pill">Default tag</span>
+            <span class="lc-pill lc-pill--accent">Needs attention</span>
+            <span class="lc-pill lc-pill--success">Confirmed</span>
+            <span class="lc-pill lc-pill--warn">Pending</span>
+          </div>
+          <div class="lc-list">
+            <div class="lc-list-item">
+              <div>
+                <p class="lc-list-item__title">Surface cards should feel soft and substantial.</p>
+                <p class="lc-list-item__meta">Use 16-28px radii, warm borders, and subtle shadows. Avoid perfectly flat table-and-form UI.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <form class="lc-form" action="#0">
+          <label class="lc-field">
+            <span class="lc-field__label">Sample input</span>
+            <input class="lc-input" type="text" value="Warm, structured, editorial." />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Sample textarea</span>
+            <textarea class="lc-textarea">Use one shared form language across onboarding, admin, and future settings surfaces.</textarea>
+          </label>
+          <label class="lc-check">
+            <input type="checkbox" checked />
+            <span>
+              <span class="lc-check__title">Binary choices live in framed check rows</span>
+              <span class="lc-check__copy">This keeps toggles readable and consistent with the rest of the card system.</span>
+            </span>
+          </label>
+        </form>
+      </div>
+    </article>
+
+    <article class="lc-card">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">Patterns</p>
+        <h2 class="lc-section-title">How to compose screens</h2>
+      </div>
+      <div class="lc-grid lc-grid--three">
+        <div class="lc-step">
+          <span class="lc-step__number">01</span>
+          <p class="lc-list-item__title">Lead with a hero card</p>
+          <p class="lc-list-item__meta">Every major page starts with a headline, short framing copy, and one or two clear actions.</p>
+        </div>
+        <div class="lc-step">
+          <span class="lc-step__number">02</span>
+          <p class="lc-list-item__title">Group by decision, not model</p>
+          <p class="lc-list-item__meta">Users think in tasks like family setup or conversational follow-up, not database entities.</p>
+        </div>
+        <div class="lc-step">
+          <span class="lc-step__number">03</span>
+          <p class="lc-list-item__title">Keep dense data framed</p>
+          <p class="lc-list-item__meta">Wrap tables in named cards so operational views still feel part of the same brand system.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="lc-card">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">Token Starter</p>
+        <h2 class="lc-section-title">CSS contract</h2>
+        <p class="lc-intro">If another page or frontend surface needs to join this system, start with these tokens and semantics instead of re-inventing colors and spacing.</p>
+      </div>
+      <pre class="lc-code">:root {
+  --lc-bg: hsl(37 33% 95%);
+  --lc-surface: hsl(40 30% 97%);
+  --lc-ink: hsl(15 4% 16%);
+  --lc-accent: hsl(4 70% 50%);
+  --lc-line: hsl(37 20% 85%);
+  --lc-radius-md: 18px;
+  --lc-radius-lg: 28px;
+  --lc-space-4: 16px;
+  --lc-space-6: 24px;
+  --lc-space-8: 32px;
+}</pre>
+    </article>
+  </section>
+{% endblock %}

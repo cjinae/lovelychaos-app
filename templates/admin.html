@@ -1,0 +1,263 @@
+{% extends "base.html" %}
+
+{% block title %}LovelyChaos Admin Console{% endblock %}
+
+{% block hero %}
+  <section class="lc-hero lc-hero--compact">
+    <div class="lc-hero__copy">
+      <p class="lc-eyebrow">Operations Console</p>
+      <h1 class="lc-display">Admin with a branded point of view.</h1>
+      <p class="lc-lead">The public site already feels warm and composed. This admin surface now uses the same language so internal operations look like part of the product, not an afterthought.</p>
+      <div class="lc-pill-row">
+        <span class="lc-pill">Routing controls</span>
+        <span class="lc-pill">Family profile data</span>
+        <span class="lc-pill lc-pill--warn">Conversational follow-up</span>
+      </div>
+    </div>
+    <div class="lc-hero__aside">
+      <a class="lc-button" href="/admin/activity">View inbound activity</a>
+      <a class="lc-button lc-button--secondary" href="/design-language">Review design language</a>
+    </div>
+  </section>
+{% endblock %}
+
+{% block page %}
+  <section class="lc-grid lc-grid--two">
+    <article class="lc-card">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">Settings</p>
+        <h2 class="lc-card__title">Digest behavior</h2>
+        <p class="lc-card__copy">Keep slower-moving logistics in digests without exposing routing internals.</p>
+      </div>
+      <form class="lc-form" method="post" action="/admin/settings/form">
+        <label class="lc-check">
+          <input type="checkbox" name="daily_summary_enabled" {% if settings.daily_summary_enabled %}checked{% endif %} />
+          <span>
+            <span class="lc-check__title">Send daily summary</span>
+            <span class="lc-check__copy">Bundle low-priority information into one concise end-of-day digest.</span>
+          </span>
+        </label>
+        <label class="lc-check">
+          <input type="checkbox" name="weekly_digest_enabled" {% if settings.weekly_digest_enabled %}checked{% endif %} />
+          <span>
+            <span class="lc-check__title">Send weekly digest</span>
+            <span class="lc-check__copy">Capture slower-moving family logistics in a weekly recap.</span>
+          </span>
+        </label>
+        <button class="lc-button" type="submit">Save settings</button>
+      </form>
+    </article>
+
+    <article class="lc-card">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">Children</p>
+        <h2 class="lc-card__title">School roster</h2>
+        <p class="lc-card__copy">The child list and school autocomplete now share the same reusable form language as the rest of the product.</p>
+      </div>
+      <div class="lc-list">
+        {% for child in children %}
+          <div class="lc-list-item">
+            <div>
+              <p class="lc-list-item__title">{{ child.name }}</p>
+              <p class="lc-list-item__meta">{{ child.school_name }}{% if child.grade %} · {{ child.grade }}{% endif %}</p>
+            </div>
+          </div>
+        {% else %}
+          <p class="lc-empty">No children added yet.</p>
+        {% endfor %}
+      </div>
+      <form class="lc-form" method="post" action="/admin/children/form" style="margin-top: 18px;">
+        <div class="lc-form-grid lc-form-grid--two">
+          <label class="lc-field">
+            <span class="lc-field__label">Name</span>
+            <input class="lc-input" name="name" placeholder="Child name" required />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Grade</span>
+            <input class="lc-input" name="grade" placeholder="Grade" />
+          </label>
+        </div>
+        <label class="lc-field">
+          <span class="lc-field__label">School</span>
+          <span class="school-autocomplete">
+            <input class="lc-input" name="school_name" placeholder="School" required autocomplete="off" data-school-autocomplete />
+            <div class="school-suggestions" data-school-suggestions></div>
+          </span>
+        </label>
+        <p class="lc-note" id="admin-school-timezone-status">School search uses the GTA directory and falls back to location lookup when needed.</p>
+        <button class="lc-button" type="submit">Add child</button>
+      </form>
+    </article>
+
+    <article class="lc-card">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">Preferences</p>
+        <h2 class="lc-card__title">Priority profile</h2>
+        <p class="lc-card__copy">System defaults and custom topics now drive what LovelyChaos treats as important for this household.</p>
+      </div>
+      <p class="lc-note"><strong>Version:</strong> {{ prefs.version }}</p>
+      <form class="lc-form" method="post" action="/admin/preferences/form">
+        <div class="lc-stack" style="gap: 14px;">
+          <div>
+            <p class="lc-field__label">System default priorities</p>
+            {% for item in prefs.system_defaults %}
+              <label class="lc-check">
+                <input type="checkbox" name="system_default_{{ item.key }}" {% if item.enabled %}checked{% endif %} />
+                <span>
+                  <span class="lc-check__title">{{ item.label }}</span>
+                  <span class="lc-check__copy">{{ item.description }} Examples: {{ item.examples | join(', ') }}.</span>
+                </span>
+              </label>
+            {% endfor %}
+          </div>
+          <div>
+            <p class="lc-field__label">User priority topics</p>
+            <div class="lc-pill-row" data-topic-preview>
+              {% for topic in prefs.user_priority_topics %}
+                <span class="lc-pill">{{ topic }}</span>
+              {% else %}
+                <span class="lc-pill lc-pill--secondary">No custom topics yet</span>
+              {% endfor %}
+            </div>
+            <label class="lc-field">
+              <span class="lc-field__label">Priority topics (one per line)</span>
+              <textarea class="lc-textarea" name="user_priority_topics" data-topic-textarea>{{ prefs.user_priority_topics | join('\n') }}</textarea>
+            </label>
+          </div>
+        </div>
+        <label class="lc-field">
+          <span class="lc-field__label">Raw preference notes</span>
+          <textarea class="lc-textarea" name="raw_text">{{ prefs.raw_text }}</textarea>
+        </label>
+        <div>
+          <p class="lc-field__label">Saved conversational rules</p>
+          <div class="lc-pill-row">
+            {% for rule in prefs.command_written_preferences %}
+              <span class="lc-pill lc-pill--secondary">{{ rule.label }} · {{ rule.behavior }}</span>
+            {% else %}
+              <span class="lc-pill lc-pill--secondary">No command-written rules yet</span>
+            {% endfor %}
+          </div>
+        </div>
+        <button class="lc-button" type="submit">Save priority profile</button>
+      </form>
+    </article>
+
+    <article class="lc-card">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">Calendar</p>
+        <h2 class="lc-card__title">Provider binding</h2>
+        <p class="lc-card__copy">Keep calendar credentials and ownership metadata in one structured panel.</p>
+      </div>
+      <form class="lc-form" method="post" action="/admin/calendar-binding/form">
+        <div class="lc-form-grid lc-form-grid--two">
+          <label class="lc-field">
+            <span class="lc-field__label">Provider user email</span>
+            <input class="lc-input" name="provider_user_email" value="{{ calendar.provider_user_email }}" required />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Token subject</span>
+            <input class="lc-input" name="token_subject" value="{{ calendar.token_subject }}" required />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Calendar ID</span>
+            <input class="lc-input" name="calendar_id" value="{{ calendar.calendar_id }}" required />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Calendar owner email</span>
+            <input class="lc-input" name="calendar_owner_email" value="{{ calendar.calendar_owner_email }}" required />
+          </label>
+        </div>
+        <label class="lc-field">
+          <span class="lc-field__label">Access token</span>
+          <input class="lc-input" name="access_token" value="" placeholder="Paste a fresh access token" required />
+        </label>
+        <button class="lc-button" type="submit">Save calendar binding</button>
+      </form>
+    </article>
+  </section>
+
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    (() => {
+      const schoolInputs = document.querySelectorAll('[data-school-autocomplete]');
+      const status = document.getElementById('admin-school-timezone-status');
+      let activeContainer = null;
+
+      async function fetchMatches(query) {
+        const response = await fetch(`/admin/schools/search?q=${encodeURIComponent(query)}`);
+        if (!response.ok) return [];
+        const payload = await response.json();
+        return payload.results || [];
+      }
+
+      function clearSuggestions(container) {
+        if (!container) return;
+        container.innerHTML = '';
+        container.classList.remove('is-open');
+      }
+
+      function renderMatches(container, matches) {
+        clearSuggestions(container);
+        for (const match of matches) {
+          const option = document.createElement('div');
+          option.className = 'school-suggestion';
+          option.dataset.schoolName = match.school_name;
+          option.innerHTML = `<strong>${match.school_name}</strong><small>${match.city} - ${match.board_name}</small>`;
+          container.appendChild(option);
+        }
+        if (matches.length) {
+          container.classList.add('is-open');
+          activeContainer = container;
+        }
+      }
+
+      for (const input of schoolInputs) {
+        const container = input.parentElement.querySelector('[data-school-suggestions]');
+        input.addEventListener('input', async (event) => {
+          const query = event.target.value.trim();
+          if (query.length < 2) {
+            clearSuggestions(container);
+            return;
+          }
+          const matches = await fetchMatches(query);
+          renderMatches(container, matches);
+          status.textContent = matches.length
+            ? `Found ${matches.length} GTA school matches.`
+            : 'No GTA match yet. A location lookup will be attempted when you save.';
+        });
+        input.addEventListener('blur', () => {
+          window.setTimeout(() => clearSuggestions(container), 150);
+        });
+        container.addEventListener('mousedown', (event) => {
+          const option = event.target.closest('.school-suggestion');
+          if (!option) return;
+          input.value = option.dataset.schoolName || '';
+          clearSuggestions(container);
+        });
+      }
+
+      document.addEventListener('mousedown', (event) => {
+        if (activeContainer && !event.target.closest('.school-autocomplete')) {
+          clearSuggestions(activeContainer);
+          activeContainer = null;
+        }
+      });
+
+      const topicTextarea = document.querySelector('[data-topic-textarea]');
+      const topicPreview = document.querySelector('[data-topic-preview]');
+      if (topicTextarea && topicPreview) {
+        const renderTopics = () => {
+          const topics = topicTextarea.value.split('\n').map((value) => value.trim()).filter(Boolean);
+          topicPreview.innerHTML = topics.length
+            ? topics.map((topic) => `<span class="lc-pill">${topic}</span>`).join('')
+            : '<span class="lc-pill lc-pill--secondary">No custom topics yet</span>';
+        };
+        topicTextarea.addEventListener('input', renderTopics);
+        renderTopics();
+      }
+    })();
+  </script>
+{% endblock %}

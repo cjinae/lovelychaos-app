@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}LovelyChaos{% endblock %}</title>
+  <link rel="stylesheet" href="{{ request.url_for('static', path='lovelychaos-design.css') }}" />
+  {% block extra_head %}{% endblock %}
+</head>
+<body>
+  <div class="lc-site-chrome">
+    <div class="lc-orb lc-orb--one"></div>
+    <div class="lc-orb lc-orb--two"></div>
+
+    <header class="lc-sitebar">
+      <div class="lc-shell lc-sitebar__inner">
+        <div class="lc-brand-block">
+          <a class="lc-brand" href="/onboarding">LovelyChaos</a>
+          <p class="lc-brand__tag">Editorial calm for family logistics</p>
+        </div>
+        <nav class="lc-nav" aria-label="Primary">
+          <a class="lc-nav__link{% if request.url.path == '/onboarding' %} is-active{% endif %}" href="/onboarding">Onboarding</a>
+          <a class="lc-nav__link{% if request.url.path == '/admin' %} is-active{% endif %}" href="/admin">Admin</a>
+          <a class="lc-nav__link{% if request.url.path == '/admin/activity' %} is-active{% endif %}" href="/admin/activity">Activity</a>
+          <a class="lc-nav__link{% if request.url.path == '/design-language' %} is-active{% endif %}" href="/design-language">Design Language</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="lc-shell lc-main">
+      {% block hero %}{% endblock %}
+      {% block page %}{% endblock %}
+    </main>
+  </div>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>

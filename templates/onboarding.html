@@ -1,0 +1,322 @@
+{% extends "base.html" %}
+
+{% block title %}LovelyChaos Onboarding{% endblock %}
+
+{% block hero %}
+  <section class="lc-hero">
+    <div class="lc-hero__copy">
+      <p class="lc-eyebrow">Family Setup</p>
+      <h1 class="lc-display">A calmer start for a busy household.</h1>
+      <p class="lc-lead">Onboarding should feel like the public homepage translated into action: warm, legible, and step-based rather than looking like a raw settings dump.</p>
+      <div class="lc-pill-row">
+        <span class="lc-pill">Profile</span>
+        <span class="lc-pill">Kids + schools</span>
+        <span class="lc-pill">Calendar connection</span>
+      </div>
+    </div>
+    <div class="lc-hero__aside">
+      <a class="lc-button" href="/auth/google/start?household_id=1">Connect Google Calendar</a>
+      <a class="lc-button lc-button--secondary" href="/design-language">Open design language</a>
+    </div>
+  </section>
+{% endblock %}
+
+{% block page %}
+  <section class="lc-grid lc-grid--three">
+    <article class="lc-stat">
+      <p class="lc-stat__value">1</p>
+      <p class="lc-stat__label">Set the family profile and communication defaults.</p>
+    </article>
+    <article class="lc-stat">
+      <p class="lc-stat__value">2</p>
+      <p class="lc-stat__label">Add children and schools so timezone and relevancy stay grounded.</p>
+    </article>
+    <article class="lc-stat">
+      <p class="lc-stat__value">3</p>
+      <p class="lc-stat__label">Connect Google Calendar so the assistant can move from analysis to action.</p>
+    </article>
+  </section>
+
+  <section class="lc-stack" style="margin-top: 24px;">
+    <article class="lc-card">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">Step 1</p>
+        <h2 class="lc-section-title">Family profile</h2>
+        <p class="lc-intro">Capture the adults, default timezone, and phone context before routing starts.</p>
+      </div>
+      <form class="lc-form" method="post" action="/onboarding/profile/form">
+        <div class="lc-form-grid lc-form-grid--two">
+          <label class="lc-field">
+            <span class="lc-field__label">Admin email</span>
+            <input class="lc-input" name="admin_email" type="email" value="{{ profile.admin_email }}" required />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Second parent email</span>
+            <input class="lc-input" name="secondary_admin_email" type="email" value="{{ profile.secondary_admin_email }}" />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Admin phone</span>
+            <input class="lc-input" name="admin_phone" value="{{ profile.admin_phone }}" />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Spouse phone</span>
+            <input class="lc-input" name="spouse_phone" value="{{ profile.spouse_phone }}" />
+          </label>
+        </div>
+        <div class="lc-form-grid lc-form-grid--two">
+          <label class="lc-field">
+            <span class="lc-field__label">Timezone</span>
+            <input class="lc-input" id="timezone_value" name="timezone_value" value="{{ profile.timezone }}" readonly />
+          </label>
+          <label class="lc-check">
+            <input type="checkbox" name="spouse_notifications_enabled" {% if profile.spouse_notifications_enabled %}checked{% endif %} />
+            <span>
+              <span class="lc-check__title">Spouse notifications enabled</span>
+              <span class="lc-check__copy">Allow receive-only notifications for the second caregiver.</span>
+            </span>
+          </label>
+        </div>
+        <p class="lc-note" id="school-timezone-status">Timezone is derived from the selected school when possible.</p>
+        <button class="lc-button" type="submit">Save family profile</button>
+      </form>
+    </article>
+
+    <article class="lc-card">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">Step 2</p>
+        <h2 class="lc-section-title">Kids and schools</h2>
+        <p class="lc-intro">School context powers timezone resolution and helps LovelyChaos decide what matters to your household.</p>
+      </div>
+      <div class="lc-list">
+        {% for child in children %}
+          <div class="lc-list-item">
+            <div>
+              <p class="lc-list-item__title">{{ child.name }}</p>
+              <p class="lc-list-item__meta">{{ child.school_name }}{% if child.grade %} · {{ child.grade }}{% endif %}</p>
+            </div>
+          </div>
+        {% else %}
+          <p class="lc-empty">No children added yet.</p>
+        {% endfor %}
+      </div>
+      <form class="lc-form" method="post" action="/onboarding/children/form" style="margin-top: 18px;">
+        <div class="lc-form-grid lc-form-grid--two">
+          <label class="lc-field">
+            <span class="lc-field__label">Child name</span>
+            <input class="lc-input" name="name" placeholder="Child name" required />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Grade</span>
+            <input class="lc-input" name="grade" placeholder="Grade" />
+          </label>
+        </div>
+        <label class="lc-field">
+          <span class="lc-field__label">School</span>
+          <span class="school-autocomplete">
+            <input class="lc-input" name="school_name" placeholder="School" required autocomplete="off" data-school-autocomplete />
+            <div class="school-suggestions" data-school-suggestions></div>
+          </span>
+        </label>
+        <button class="lc-button" type="submit">Add child</button>
+      </form>
+    </article>
+
+    <article class="lc-card">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">Step 3</p>
+        <h2 class="lc-section-title">Digests</h2>
+        <p class="lc-intro">Choose how often LovelyChaos sends slower-moving family summaries.</p>
+      </div>
+      <form class="lc-form" method="post" action="/onboarding/settings/form">
+        <label class="lc-check">
+          <input type="checkbox" name="daily_summary_enabled" {% if settings.daily_summary_enabled %}checked{% endif %} />
+          <span>
+            <span class="lc-check__title">Enable daily summary</span>
+            <span class="lc-check__copy">Collect informational updates into a single daily digest.</span>
+          </span>
+        </label>
+        <label class="lc-check">
+          <input type="checkbox" name="weekly_digest_enabled" {% if settings.weekly_digest_enabled %}checked{% endif %} />
+          <span>
+            <span class="lc-check__title">Enable weekly digest</span>
+            <span class="lc-check__copy">Use a weekly summary for slower-moving logistics and reminders.</span>
+          </span>
+        </label>
+        <button class="lc-button" type="submit">Save routing settings</button>
+      </form>
+    </article>
+
+    <article class="lc-card">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">Step 4</p>
+        <h2 class="lc-section-title">Priority profile</h2>
+        <p class="lc-intro">System defaults keep the basics on, while your custom priorities teach LovelyChaos what this household cares about.</p>
+      </div>
+      <form class="lc-form" method="post" action="/onboarding/preferences/form">
+        <div class="lc-stack" style="gap: 14px;">
+          <div>
+            <p class="lc-field__label">System default priorities</p>
+            {% for item in prefs.system_defaults %}
+              <label class="lc-check">
+                <input
+                  type="checkbox"
+                  name="system_default_{{ item.key }}"
+                  {% if item.enabled %}checked{% endif %}
+                />
+                <span>
+                  <span class="lc-check__title">{{ item.label }}</span>
+                  <span class="lc-check__copy">{{ item.description }} Examples: {{ item.examples | join(', ') }}.</span>
+                </span>
+              </label>
+            {% endfor %}
+          </div>
+          <div>
+            <p class="lc-field__label">User priority topics</p>
+            <div class="lc-pill-row" data-topic-preview>
+              {% for topic in prefs.user_priority_topics %}
+                <span class="lc-pill">{{ topic }}</span>
+              {% else %}
+                <span class="lc-pill lc-pill--secondary">No custom topics yet</span>
+              {% endfor %}
+            </div>
+            <label class="lc-field">
+              <span class="lc-field__label">Priority topics (one per line)</span>
+              <textarea class="lc-textarea" name="user_priority_topics" data-topic-textarea>{{ prefs.user_priority_topics | join('\n') }}</textarea>
+            </label>
+          </div>
+        </div>
+        <label class="lc-field">
+          <span class="lc-field__label">Raw preference notes</span>
+          <textarea class="lc-textarea" name="raw_text">{{ prefs.raw_text }}</textarea>
+        </label>
+        <div>
+          <p class="lc-field__label">Saved conversational rules</p>
+          <div class="lc-pill-row">
+            {% for rule in prefs.command_written_preferences %}
+              <span class="lc-pill lc-pill--secondary">{{ rule.label }} · {{ rule.behavior }}</span>
+            {% else %}
+              <span class="lc-pill lc-pill--secondary">No command-written rules yet</span>
+            {% endfor %}
+          </div>
+        </div>
+        <button class="lc-button" type="submit">Save priority profile</button>
+      </form>
+    </article>
+
+    <article class="lc-card lc-card--tint">
+      <div class="lc-card__head">
+        <p class="lc-eyebrow">Step 5</p>
+        <h2 class="lc-section-title">Google Calendar</h2>
+        <p class="lc-intro">Once the calendar is connected, the assistant can move from triage into direct scheduling.</p>
+      </div>
+      <div class="lc-actions">
+        <a class="lc-button" href="/auth/google/start?household_id=1">Connect Google Calendar</a>
+      </div>
+      <p class="lc-note">After connecting, send real email to <strong>schedule@lovelychaos.ca</strong> once inbound provider forwarding is configured.</p>
+    </article>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    (() => {
+      const schoolInputs = document.querySelectorAll('[data-school-autocomplete]');
+      const timezoneInput = document.getElementById('timezone_value');
+      const status = document.getElementById('school-timezone-status');
+      const cachedMatches = new Map();
+      let activeContainer = null;
+
+      async function fetchMatches(query) {
+        const response = await fetch(`/admin/schools/search?q=${encodeURIComponent(query)}`);
+        if (!response.ok) return [];
+        const payload = await response.json();
+        return payload.results || [];
+      }
+
+      async function resolveSchool(name) {
+        const response = await fetch(`/admin/schools/resolve?name=${encodeURIComponent(name)}`);
+        if (!response.ok) return null;
+        return response.json();
+      }
+
+      function clearSuggestions(container) {
+        if (!container) return;
+        container.innerHTML = '';
+        container.classList.remove('is-open');
+      }
+
+      function renderMatches(container, matches) {
+        clearSuggestions(container);
+        cachedMatches.clear();
+        for (const match of matches) {
+          const option = document.createElement('div');
+          option.className = 'school-suggestion';
+          option.dataset.schoolName = match.school_name;
+          option.innerHTML = `<strong>${match.school_name}</strong><small>${match.city} - ${match.board_name}</small>`;
+          container.appendChild(option);
+          cachedMatches.set(match.school_name.toLowerCase(), match);
+        }
+        if (matches.length) {
+          container.classList.add('is-open');
+          activeContainer = container;
+        }
+      }
+
+      async function updateTimezone(name) {
+        if (!name) return;
+        const cached = cachedMatches.get(name.toLowerCase());
+        const resolved = cached || await resolveSchool(name);
+        if (!resolved) {
+          status.textContent = 'School not found in GTA list. A location lookup will be used on save when possible.';
+          return;
+        }
+        timezoneInput.value = resolved.timezone || timezoneInput.value;
+        const city = resolved.city ? ` (${resolved.city})` : '';
+        status.textContent = `Timezone set to ${resolved.timezone}${city}.`;
+      }
+
+      for (const input of schoolInputs) {
+        const container = input.parentElement.querySelector('[data-school-suggestions]');
+        input.addEventListener('input', async (event) => {
+          const query = event.target.value.trim();
+          if (query.length < 2) {
+            clearSuggestions(container);
+            return;
+          }
+          renderMatches(container, await fetchMatches(query));
+        });
+        input.addEventListener('change', (event) => updateTimezone(event.target.value.trim()));
+        input.addEventListener('blur', () => {
+          window.setTimeout(() => clearSuggestions(container), 150);
+        });
+        container.addEventListener('mousedown', (event) => {
+          const option = event.target.closest('.school-suggestion');
+          if (!option) return;
+          input.value = option.dataset.schoolName || '';
+          clearSuggestions(container);
+          updateTimezone(input.value.trim());
+        });
+      }
+
+      document.addEventListener('mousedown', (event) => {
+        if (activeContainer && !event.target.closest('.school-autocomplete')) {
+          clearSuggestions(activeContainer);
+          activeContainer = null;
+        }
+      });
+
+      const topicTextarea = document.querySelector('[data-topic-textarea]');
+      const topicPreview = document.querySelector('[data-topic-preview]');
+      if (topicTextarea && topicPreview) {
+        const renderTopics = () => {
+          const topics = topicTextarea.value.split('\n').map((value) => value.trim()).filter(Boolean);
+          topicPreview.innerHTML = topics.length
+            ? topics.map((topic) => `<span class="lc-pill">${topic}</span>`).join('')
+            : '<span class="lc-pill lc-pill--secondary">No custom topics yet</span>';
+        };
+        topicTextarea.addEventListener('input', renderTopics);
+        renderTopics();
+      }
+    })();
+  </script>
+{% endblock %}
