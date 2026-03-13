@@ -51,14 +51,21 @@ def db_session(session_factory: sessionmaker) -> Generator[Session, None, None]:
 
 @pytest.fixture
 def client(session_factory: sessionmaker) -> Generator[TestClient, None, None]:
+    import app.main as main_module
+
     def override_get_db():
         with session_factory() as db:
             yield db
 
     app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as test_client:
-        yield test_client
-    app.dependency_overrides.clear()
+    original_engine = main_module.engine
+    main_module.engine = session_factory.kw["bind"]
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        main_module.engine = original_engine
+        app.dependency_overrides.clear()
 
 
 @pytest.fixture(autouse=True)
