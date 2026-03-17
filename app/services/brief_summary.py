@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import re
 from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
@@ -40,6 +40,13 @@ SUMMARY_MENTION_TERMS = (
     "heritage month",
     "awareness month",
     "spirit wear",
+    "donation",
+    "fundraising",
+    "fundraiser",
+    "food drive",
+    "holiday hamper",
+    "deadline",
+    "reminder",
 )
 SUMMARY_IGNORE_TERMS = (
     "daylight saving time",
@@ -50,6 +57,53 @@ SUMMARY_IGNORE_TERMS = (
     "donation drop-off window",
     "drop-off window",
 )
+RESCUE_EVENT_TERMS = (
+    "join us",
+    "save the date",
+    "open house",
+    "concert",
+    "meeting",
+    "math night",
+    "movie night",
+    "photo day",
+    "family night",
+    "night",
+    "showcase",
+)
+MONTH_NAME_MAP = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+DATE_PATTERN = re.compile(
+    r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)?\s*,?\s*"
+    r"(?P<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+    r"\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?(?:,\s*(?P<year>\d{4}))?",
+    re.I,
+)
+TIME_PATTERN = re.compile(r"\b(\d{1,2}:\d{2}\s*(?:am|pm))\b", re.I)
 
 
 @dataclass
@@ -262,13 +316,28 @@ def _prefilter_summary_context(
         else:
             dropped_sections.append({k: v for k, v in payload.items() if k != "text"})
 
+    rescued_sections: list[dict] = []
+    if not event_facts and not kept_sections:
+        rescued_sections = _rescue_high_signal_sections(sections)
+        for rescued in rescued_sections:
+            kept_sections.append(rescued)
+            dropped_sections = [
+                item
+                for item in dropped_sections
+                if item.get("section_index") != rescued.get("section_index")
+            ]
+
     kept_sections = kept_sections[:8]
     notes = [note for note in chunk_notes if note and note != "empty_model_events"]
+    if rescued_sections:
+        notes.append("summary rescue used high-signal event sections")
     fallback_candidates = _deterministic_candidates(
         timezone_name=timezone_name,
         event_facts=event_facts,
         analysis_text=analysis_text,
         user_priority_topics=normalized_user_topics,
+        rescued_sections=rescued_sections,
+        title_hint=_summary_title_hint(subject, child_context["schools"]),
     )
     missing_requested_topics = _detect_missing_requested_topics(normalized_user_topics, analysis_text, fallback_candidates)
     title_hint = _summary_title_hint(subject, child_context["schools"])
@@ -370,6 +439,8 @@ def _deterministic_candidates(
     event_facts: list[dict],
     analysis_text: str,
     user_priority_topics: list[str],
+    rescued_sections: list[dict],
+    title_hint: str,
 ) -> list[dict]:
     candidates: list[dict] = []
     for event in event_facts:
@@ -397,6 +468,7 @@ def _deterministic_candidates(
         ("Mandatory forms or payments", ("form", "school cash online", "cash online", "permission")),
         ("Volunteering or event support", ("volunteer", "wristband")),
         ("School council updates", ("school council", "executive results")),
+        ("Fundraising or donation updates", ("donation", "fundraising", "fundraiser", "food drive", "holiday hamper")),
         ("Heritage months mentioned", ("heritage month", "heritage months")),
         ("Awareness months mentioned", ("awareness month", "awareness months")),
     ]
@@ -416,6 +488,8 @@ def _deterministic_candidates(
                 "reason": "deterministic_topic_match",
             }
         )
+
+    candidates.extend(_rescue_candidates_from_sections(rescued_sections, title_hint, timezone_name))
 
     for topic in user_priority_topics:
         normalized_topic = _normalize_text(topic)
@@ -503,6 +577,14 @@ def _render_summary(
     other_topics: list[SummaryLine],
     missing_requested_topics: list[str],
 ) -> str:
+    if not important_dates and not important_items and not other_topics:
+        return "\n".join(
+            [
+                title,
+                "",
+                "I found a school update but couldn't extract a clean summary. Reply if you want me to summarize this one manually.",
+            ]
+        )
     lines = [title]
     if important_dates:
         lines.extend(["", "Important Dates"])
@@ -779,3 +861,261 @@ def _dedupe_strings(values: Iterable[str]) -> list[str]:
         seen.add(key)
         ordered.append(cleaned)
     return ordered
+
+
+def _rescue_high_signal_sections(sections: list[AnalysisSection]) -> list[dict]:
+    rescued_sections: dict[int, AnalysisSection] = {}
+    for section in sections:
+        lowered = _normalize_text(f"{section.label} {section.text}")
+        if any(term in lowered for term in GENERIC_SECTION_TERMS):
+            continue
+        if "unsubscribe" in lowered or "schoolmessenger is a notification service" in lowered:
+            continue
+        if not _section_looks_like_rescuable_event(section, lowered):
+            continue
+        rescued_sections[section.index] = section
+        for neighbor in sections:
+            if abs(neighbor.index - section.index) != 1:
+                continue
+            neighbor_lowered = _normalize_text(f"{neighbor.label} {neighbor.text}")
+            if any(term in neighbor_lowered for term in GENERIC_SECTION_TERMS):
+                continue
+            if any(term in neighbor_lowered for term in RESCUE_EVENT_TERMS) or DATE_PATTERN.search(neighbor.text) or TIME_PATTERN.search(neighbor.text):
+                rescued_sections[neighbor.index] = neighbor
+    rescued = [
+        {
+            "section_index": section.index,
+            "label": section.label,
+            "section_kind": section.section_kind,
+            "priority_score": section.priority_score,
+            "source_kind": section.source_kind,
+            "char_count": len(section.text),
+            "text": section.text[:1400],
+        }
+        for section in rescued_sections.values()
+    ]
+    rescued.sort(key=lambda item: (-int(item["priority_score"]), int(item["section_index"])))
+    return rescued[:3]
+
+
+def _section_looks_like_rescuable_event(section: AnalysisSection, lowered: str) -> bool:
+    has_date = bool(DATE_PATTERN.search(section.text))
+    has_time = bool(TIME_PATTERN.search(section.text))
+    has_relative_day = "tonight" in lowered or "tomorrow" in lowered
+    has_event_term = any(term in lowered for term in RESCUE_EVENT_TERMS)
+    if not (has_date or has_time or has_relative_day):
+        return False
+    if section.priority_score >= 50 and has_event_term:
+        return True
+    return has_date and has_event_term
+
+
+def _rescue_candidates_from_sections(rescued_sections: list[dict], title_hint: str, timezone_name: str) -> list[dict]:
+    if not rescued_sections:
+        return []
+    combined = "\n".join(section.get("text", "") for section in rescued_sections if section.get("text"))
+    event_title = _rescue_event_title(combined, title_hint)
+    if not event_title:
+        return []
+
+    start_local, end_local = _rescue_event_window(combined, timezone_name)
+    source_refs = [f"section:{section['section_index']}" for section in rescued_sections if section.get("section_index")]
+    if start_local is not None:
+        start_utc = start_local.astimezone(timezone.utc)
+        end_utc = end_local.astimezone(timezone.utc) if end_local else None
+        line = _summary_text_for_event(
+            {
+                "title": event_title,
+                "start_at": _serialize_dt(start_utc),
+                "end_at": _serialize_dt(end_utc),
+                "applies_to": [],
+            },
+            timezone_name,
+        )
+        return [
+            {
+                "text": line,
+                "consolidated_priority": "important",
+                "matched_system_defaults": [],
+                "matched_user_priorities": [],
+                "source_refs": source_refs,
+                "applies_to": [],
+                "date_sort_key": _serialize_dt(start_utc),
+                "has_date": True,
+                "reason": "rescued_single_event_section",
+            }
+        ]
+
+    return [
+        {
+            "text": event_title,
+            "consolidated_priority": "important",
+            "matched_system_defaults": [],
+            "matched_user_priorities": [],
+            "source_refs": source_refs,
+            "applies_to": [],
+            "date_sort_key": None,
+            "has_date": False,
+            "reason": "rescued_single_event_section",
+        }
+    ]
+
+
+def _rescue_event_title(text: str, title_hint: str) -> str:
+    for pattern in (
+        r"join us for\s+([A-Z][A-Z\s&'-]{4,}|[A-Za-z][A-Za-z0-9\s&'/-]{4,40})",
+        r"save the date for\s+([A-Z][A-Za-z0-9\s&'/-]{4,40})",
+        r"upcoming\s+([A-Z][A-Za-z0-9\s&'/-]{4,40})",
+    ):
+        match = re.search(pattern, text, re.I)
+        if match:
+            return _humanize_event_title(match.group(1))
+
+    for line in text.splitlines():
+        cleaned = line.strip(" *\t")
+        if not cleaned:
+            continue
+        if "family math night" in cleaned.lower():
+            return "Family Math Night"
+        if cleaned.isupper() and len(cleaned.split()) <= 6:
+            return _humanize_event_title(cleaned)
+
+    subject = re.sub(r"^Fwd:\s*", "", title_hint, flags=re.I)
+    subject = re.sub(r"\b(tonight|tomorrow|today)\b", "", subject, flags=re.I)
+    subject = re.sub(r"\bupdate\b", "", subject, flags=re.I)
+    subject = re.sub(r"\([^)]*\)", "", subject)
+    subject = re.sub(r"\s+", " ", subject).strip(" -:")
+    if subject:
+        return _humanize_event_title(subject)
+    return ""
+
+
+def _humanize_event_title(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", value.replace("*", " ")).strip(" -:")
+    if cleaned.isupper():
+        return cleaned.title()
+    words = []
+    for word in cleaned.split():
+        if word.isupper() and len(word) > 1:
+            words.append(word.title())
+        else:
+            words.append(word)
+    return " ".join(words)
+
+
+def _rescue_event_window(text: str, timezone_name: str) -> tuple[Optional[datetime], Optional[datetime]]:
+    zone = _safe_zoneinfo(timezone_name)
+    reference_dt = _reference_datetime_from_text(text, zone)
+    start_date = _absolute_date_from_text(text, zone)
+    if start_date is None and reference_dt is not None:
+        lowered = _normalize_text(text)
+        if "tomorrow" in lowered:
+            start_date = datetime(
+                reference_dt.year,
+                reference_dt.month,
+                reference_dt.day,
+                0,
+                0,
+                tzinfo=zone,
+            ) + timedelta(days=1)
+        elif "tonight" in lowered or "today" in lowered:
+            start_date = datetime(reference_dt.year, reference_dt.month, reference_dt.day, 0, 0, tzinfo=zone)
+    if start_date is None:
+        return None, None
+
+    start_time, end_time = _event_times_from_text(text)
+    if start_time:
+        start_local = start_date.replace(hour=start_time.hour, minute=start_time.minute)
+    else:
+        start_local = start_date
+    if end_time:
+        end_local = start_date.replace(hour=end_time.hour, minute=end_time.minute)
+        if end_local <= start_local:
+            end_local += timedelta(days=1)
+    else:
+        end_local = None
+    return start_local, end_local
+
+
+def _reference_datetime_from_text(text: str, zone: ZoneInfo) -> Optional[datetime]:
+    match = re.search(
+        r"original email date:\s*(?:\w{3},\s*)?(?P<month>\w+)\s+(?P<day>\d{1,2}),\s*(?P<year>\d{4})",
+        text,
+        re.I,
+    )
+    if not match:
+        return None
+    month = MONTH_NAME_MAP.get(match.group("month").lower().rstrip("."))
+    if month is None:
+        return None
+    return datetime(int(match.group("year")), month, int(match.group("day")), 0, 0, tzinfo=zone)
+
+
+def _absolute_date_from_text(text: str, zone: ZoneInfo) -> Optional[datetime]:
+    match = DATE_PATTERN.search(text)
+    if not match:
+        return None
+    month = MONTH_NAME_MAP.get(match.group("month").lower().rstrip("."))
+    if month is None:
+        return None
+    year = int(match.group("year") or datetime.now(zone).year)
+    day = int(match.group("day"))
+    try:
+        return datetime(year, month, day, 0, 0, tzinfo=zone)
+    except ValueError:
+        return None
+
+
+def _event_times_from_text(text: str) -> tuple[Optional[datetime], Optional[datetime]]:
+    cleaned_text = re.sub(r"^Original email date:.*$", "", text, flags=re.I | re.M)
+    from_to = re.search(
+        r"\bfrom\s+(?P<start>\d{1,2}:\d{2}\s*(?:am|pm))\s+to\s+(?P<end>\d{1,2}:\d{2}\s*(?:am|pm))",
+        cleaned_text,
+        re.I,
+    )
+    if from_to:
+        return _parse_clock(from_to.group("start")), _parse_clock(from_to.group("end"))
+
+    begin_match = re.search(
+        r"\bbegin(?:s|ning)?(?:\s+promptly)?(?:.*?)(?:at)\s+(?P<time>\d{1,2}:\d{2}\s*(?:am|pm))",
+        cleaned_text,
+        re.I | re.S,
+    )
+    end_match = re.search(
+        r"\bend(?:s|ing)?(?:.*?)(?:at|by)\s+(?P<time>\d{1,2}:\d{2}\s*(?:am|pm))",
+        cleaned_text,
+        re.I | re.S,
+    )
+    if begin_match:
+        return _parse_clock(begin_match.group("time")), _parse_clock(end_match.group("time")) if end_match else None
+
+    times = []
+    for match in TIME_PATTERN.finditer(cleaned_text):
+        value = match.group(1)
+        context = cleaned_text[max(0, match.start() - 32) : match.end() + 32].lower()
+        times.append((value, context))
+    filtered = [
+        value
+        for value, context in times
+        if "doors open" not in context and "original email date" not in context and "\ndate:" not in context
+    ]
+    if len(filtered) >= 2:
+        return _parse_clock(filtered[0]), _parse_clock(filtered[1])
+    if filtered:
+        return _parse_clock(filtered[0]), None
+    return None, None
+
+
+def _parse_clock(value: str) -> Optional[datetime]:
+    cleaned = re.sub(r"\s+", " ", value.strip()).upper()
+    try:
+        return datetime.strptime(cleaned, "%I:%M %p")
+    except ValueError:
+        return None
+
+
+def _safe_zoneinfo(timezone_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(timezone_name)
+    except Exception:
+        return ZoneInfo("UTC")

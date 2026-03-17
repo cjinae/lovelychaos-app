@@ -20,6 +20,7 @@ def test_webhook_contract_fields(client):
         "ingestion_accepted",
         "command_accepted_for_processing",
         "command_completed",
+        "command_noop_past_event",
         "command_needs_clarification",
         "rejected_unverified_sender",
         "rejected_ambiguous_sender",
@@ -65,6 +66,7 @@ def test_sms_webhook_contract_fields(client):
     assert body["status"] in {
         "command_accepted_for_processing",
         "command_completed",
+        "command_noop_past_event",
         "command_needs_clarification",
         "rejected_unverified_sender",
         "rejected_ambiguous_sender",

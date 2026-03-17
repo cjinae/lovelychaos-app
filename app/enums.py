@@ -5,6 +5,7 @@ class WebhookStatus(str, Enum):
     INGESTION_ACCEPTED = "ingestion_accepted"
     COMMAND_ACCEPTED = "command_accepted_for_processing"
     COMMAND_COMPLETED = "command_completed"
+    COMMAND_NOOP_PAST_EVENT = "command_noop_past_event"
     COMMAND_NEEDS_CLARIFICATION = "command_needs_clarification"
     REJECTED_UNVERIFIED = "rejected_unverified_sender"
     REJECTED_AMBIGUOUS = "rejected_ambiguous_sender"

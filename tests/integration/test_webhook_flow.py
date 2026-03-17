@@ -482,7 +482,7 @@ def test_forwarded_add_preface_uses_command_mode_and_preface_only(client, db_ses
     import app.main as main_module
     from datetime import datetime, timedelta, timezone
 
-    seen_parse_inputs: list[str] = []
+    seen_parse_inputs: list[dict] = []
     seen_extract_inputs: list[str] = []
     start = datetime.now(timezone.utc) + timedelta(days=3)
 
@@ -506,15 +506,26 @@ def test_forwarded_add_preface_uses_command_mode_and_preface_only(client, db_ses
                 "email_level_notes": None,
             }
 
-        def parse_command(self, body_text):
-            seen_parse_inputs.append(body_text)
+        def parse_forwarded_preface_intent(self, *, user_preface, forwarded_subject="", forwarded_sender="", forwarded_date=""):
+            seen_parse_inputs.append(
+                {
+                    "user_preface": user_preface,
+                    "forwarded_subject": forwarded_subject,
+                    "forwarded_sender": forwarded_sender,
+                    "forwarded_date": forwarded_date,
+                }
+            )
             return {
+                "mode": "command",
                 "action": "add",
+                "topic": None,
+                "preference_behavior": None,
                 "pending_id": None,
                 "minutes_before": None,
                 "reminder_channel": None,
                 "async_requested": False,
                 "confidence": 0.99,
+                "reason": "forwarded_preface_add",
             }
 
         def metadata(self):
@@ -541,7 +552,14 @@ def test_forwarded_add_preface_uses_command_mode_and_preface_only(client, db_ses
     assert response.status_code == 200
     assert response.json()["status"] == "command_completed"
 
-    assert seen_parse_inputs == ["Add this to the calendar"]
+    assert seen_parse_inputs == [
+        {
+            "user_preface": "Add this to the calendar",
+            "forwarded_subject": "Family Math Night Tomorrow!",
+            "forwarded_sender": "Frankland CS <donotreply@tdsb.on.ca>",
+            "forwarded_date": "Tue, Mar 10, 2026 at 8:21 AM",
+        }
+    ]
     assert seen_extract_inputs
     assert "Forwarded message" not in seen_extract_inputs[0]
     assert "Add this to the calendar" not in seen_extract_inputs[0]
@@ -561,8 +579,18 @@ def test_forwarded_ambiguous_preface_needs_clarification(client, db_session, mon
         def extract_events(self, *_args, **_kwargs):
             raise AssertionError("extract_events should not be called for ambiguous forwarded prefacing")
 
-        def parse_command(self, *_args, **_kwargs):
-            raise AssertionError("parse_command should not be called for ambiguous forwarded prefacing")
+        def parse_forwarded_preface_intent(self, **_kwargs):
+            return {
+                "mode": "clarification",
+                "action": "none",
+                "topic": None,
+                "preference_behavior": None,
+                "minutes_before": None,
+                "reminder_channel": None,
+                "async_requested": False,
+                "confidence": 0.92,
+                "reason": "vague_help_request",
+            }
 
         def metadata(self):
             return {"provider": "mock", "model": "test", "prompt_versions": {}}
@@ -617,8 +645,18 @@ def test_forwarded_fyi_preface_stays_ingestion(client, db_session, monkeypatch):
                 "email_level_notes": None,
             }
 
-        def parse_command(self, *_args, **_kwargs):
-            raise AssertionError("parse_command should not be called for FYI forwarded email")
+        def parse_forwarded_preface_intent(self, **_kwargs):
+            return {
+                "mode": "ingestion",
+                "action": "none",
+                "topic": None,
+                "preference_behavior": None,
+                "minutes_before": None,
+                "reminder_channel": None,
+                "async_requested": False,
+                "confidence": 0.98,
+                "reason": "informational_preface",
+            }
 
         def metadata(self):
             return {"provider": "mock", "model": "test", "prompt_versions": {}}
@@ -681,14 +719,18 @@ def test_forwarded_add_with_multiple_actionable_events_needs_clarification(clien
                 "email_level_notes": None,
             }
 
-        def parse_command(self, *_args, **_kwargs):
+        def parse_forwarded_preface_intent(self, **_kwargs):
             return {
+                "mode": "command",
                 "action": "add",
+                "topic": None,
+                "preference_behavior": None,
                 "pending_id": None,
                 "minutes_before": None,
                 "reminder_channel": None,
                 "async_requested": False,
                 "confidence": 0.99,
+                "reason": "forwarded_preface_add",
             }
 
         def metadata(self):
@@ -719,7 +761,7 @@ def test_forwarded_add_with_multiple_actionable_events_needs_clarification(clien
     assert event is None
 
 
-def test_forwarded_add_with_no_actionable_event_needs_clarification(client, db_session, monkeypatch):
+def test_forwarded_add_with_past_event_returns_noop_past_event(client, db_session, monkeypatch):
     import app.main as main_module
     from datetime import datetime, timezone
 
@@ -741,14 +783,18 @@ def test_forwarded_add_with_no_actionable_event_needs_clarification(client, db_s
                 "email_level_notes": None,
             }
 
-        def parse_command(self, *_args, **_kwargs):
+        def parse_forwarded_preface_intent(self, **_kwargs):
             return {
+                "mode": "command",
                 "action": "add",
+                "topic": None,
+                "preference_behavior": None,
                 "pending_id": None,
                 "minutes_before": None,
                 "reminder_channel": None,
                 "async_requested": False,
                 "confidence": 0.99,
+                "reason": "forwarded_preface_add",
             }
 
         def metadata(self):
@@ -771,18 +817,282 @@ def test_forwarded_add_with_no_actionable_event_needs_clarification(client, db_s
     )
     response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
     assert response.status_code == 200
-    assert response.json()["status"] == "command_needs_clarification"
-    assert "clear future event" in response.json()["message"].lower()
+    assert response.json()["status"] == "command_noop_past_event"
+    assert "already passed" in response.json()["message"].lower()
 
     event = db_session.scalar(select(Event).where(Event.household_id == 1))
     assert event is None
+
+
+def test_forwarded_add_with_topic_scoped_dates_returns_clean_past_events(client, db_session, monkeypatch):
+    import app.main as main_module
+
+    class _Engine:
+        def extract_events(self, *_args, **_kwargs):
+            return {
+                "events": [
+                    ExtractedEvent(
+                        title="Swim dates",
+                        start_at=None,
+                        end_at=None,
+                        category="school",
+                        confidence=0.72,
+                        target_scope="school_specific",
+                        model_batch="B",
+                        model_reason="swim",
+                    ),
+                    ExtractedEvent(
+                        title="Swim date",
+                        start_at=None,
+                        end_at=None,
+                        category="school",
+                        confidence=0.7,
+                        target_scope="school_specific",
+                        model_batch="B",
+                        model_reason="swim",
+                    ),
+                ],
+                "email_level_notes": None,
+            }
+
+        def parse_forwarded_preface_intent(self, **_kwargs):
+            return {
+                "mode": "command",
+                "action": "add",
+                "topic": "swim dates",
+                "preference_behavior": None,
+                "pending_id": None,
+                "minutes_before": None,
+                "reminder_channel": None,
+                "async_requested": False,
+                "confidence": 0.99,
+                "reason": "forwarded_preface_add",
+            }
+
+        def metadata(self):
+            return {"provider": "mock", "model": "test", "prompt_versions": {}}
+
+    monkeypatch.setattr(main_module, "engine_llm", _Engine())
+
+    payload = dict(PAYLOAD_CLEAN)
+    payload["provider_event_id"] = "evt-forwarded-swim-past-1"
+    payload["provider_message_id"] = "msg-forwarded-swim-past-1"
+    payload["subject"] = "Fwd: Room 106 - Welcome Back!"
+    payload["body_text"] = (
+        "Add these swim dates to the calendar\n\n"
+        "---------- Forwarded message ---------\n"
+        "From: Poulos, Helen <helen.poulos@tdsb.on.ca>\n"
+        "Date: Sun, Jan 4, 2026 at 4:16 PM\n"
+        "Subject: Room 106 - Welcome Back!\n"
+        "To: Helen Poulos <helen.poulos@tdsb.on.ca>\n\n"
+        "Dear Families,\n\n"
+        "Please note that our swim dates for this month are Thursday, January 8th, and Tuesday, January 20th.\n"
+    )
+    response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "command_noop_past_event"
+    assert "- Jan 8: Swim" in response.json()["message"]
+    assert "- Jan 20: Swim" in response.json()["message"]
+    assert "Jan 4" not in response.json()["message"]
+    assert "Jan 8 to Jan 9" not in response.json()["message"]
+
+    event = db_session.scalar(select(Event).where(Event.household_id == 1))
+    assert event is None
+
+
+def test_forwarded_add_with_plural_command_allows_multiple_resolved_events(client, db_session, monkeypatch):
+    import app.main as main_module
+
+    class _Engine:
+        def extract_events(self, *_args, **_kwargs):
+            return {"events": [], "email_level_notes": None}
+
+        def parse_forwarded_preface_intent(self, **_kwargs):
+            return {
+                "mode": "command",
+                "action": "add",
+                "topic": None,
+                "preference_behavior": None,
+                "pending_id": None,
+                "minutes_before": None,
+                "reminder_channel": None,
+                "async_requested": False,
+                "confidence": 0.99,
+                "reason": "forwarded_preface_add",
+            }
+
+        def metadata(self):
+            return {"provider": "mock", "model": "test", "prompt_versions": {}}
+
+    monkeypatch.setattr(main_module, "engine_llm", _Engine())
+
+    payload = dict(PAYLOAD_CLEAN)
+    payload["provider_event_id"] = "evt-forwarded-add-multi-resolved-1"
+    payload["provider_message_id"] = "msg-forwarded-add-multi-resolved-1"
+    payload["subject"] = "Fwd: Pizza Days"
+    payload["body_text"] = (
+        "Add these to the calendar\n\n"
+        "---------- Forwarded message ---------\n"
+        "From: Frankland CS <donotreply@tdsb.on.ca>\n"
+        "Date: Tue, Mar 10, 2026 at 8:21 AM\n"
+        "Subject: Pizza Days\n"
+        "To: <christine.jinae@gmail.com>\n\n"
+        "Our pizza days are October 1, 2099 and October 15, 2099.\n"
+    )
+    response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "command_completed"
+
+    events = db_session.scalars(select(Event).where(Event.household_id == 1).order_by(Event.start_at.asc())).all()
+    assert len(events) == 2
+    assert [event.start_at.date().isoformat() for event in events] == ["2099-10-01", "2099-10-15"]
+
+
+def test_empty_extraction_with_informational_sections_returns_summary(client, db_session, monkeypatch):
+    import app.main as main_module
+
+    class _Engine:
+        def extract_events(self, *_args, **_kwargs):
+            return {"events": [], "email_level_notes": None}
+
+        def extract_summary_candidates(self, *_args, **_kwargs):
+            return {
+                "title": "Frankland Update",
+                "candidates": [
+                    {
+                        "text": "Dec 3: Direct donation deadline",
+                        "consolidated_priority": "important",
+                        "matched_system_defaults": [],
+                        "matched_user_priorities": [],
+                        "source_refs": ["section:donation"],
+                        "applies_to": [],
+                        "date_sort_key": "2025-12-03T05:00:00+00:00",
+                        "has_date": True,
+                        "reason": "deadline",
+                    },
+                    {
+                        "text": "Fundraising or donation updates",
+                        "consolidated_priority": "mentioned",
+                        "matched_system_defaults": [],
+                        "matched_user_priorities": [],
+                        "source_refs": ["topic:donation"],
+                        "applies_to": [],
+                        "date_sort_key": None,
+                        "has_date": False,
+                        "reason": "donation update",
+                    },
+                ],
+                "notes": [],
+                "missing_requested_topics": [],
+            }
+
+        def compress_summary(self, summary_context):
+            return {
+                "title": "Frankland Update",
+                "important_dates": [
+                    {
+                        "text": "Dec 3: Direct donation deadline",
+                        "source_refs": ["section:donation"],
+                        "applies_to": [],
+                        "date_sort_key": "2025-12-03T05:00:00+00:00",
+                    }
+                ],
+                "important_items": [],
+                "other_topics": [
+                    {
+                        "text": "Fundraising or donation updates",
+                        "source_refs": ["topic:donation"],
+                        "applies_to": [],
+                        "date_sort_key": None,
+                    }
+                ],
+                "missing_requested_topics": [],
+                "notes": [],
+            }
+
+        def metadata(self):
+            return {"provider": "mock", "model": "test", "prompt_versions": {}}
+
+    monkeypatch.setattr(main_module, "engine_llm", _Engine())
+
+    payload = dict(PAYLOAD_CLEAN)
+    payload["provider_event_id"] = "evt-empty-summary-1"
+    payload["provider_message_id"] = "msg-empty-summary-1"
+    payload["subject"] = "Fwd: Direct Donation Reminder"
+    payload["body_text"] = (
+        "---------- Forwarded message ---------\n"
+        "From: Frankland School Council <donotreply@tdsb.on.ca>\n"
+        "Date: Tue, Nov 25, 2025 at 1:47 PM\n"
+        "Subject: Direct Donation Reminder\n"
+        "To: <christine.jinae@gmail.com>\n\n"
+        "Please consider making a donation by next Wednesday, Dec 3rd.\n"
+    )
+
+    response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "ingestion_accepted"
+
+    info = db_session.scalar(select(InformationalItem).where(InformationalItem.household_id == 1))
+    assert info is not None
+    assert "Frankland Update" in info.title
+
+
+def test_empty_extraction_single_event_email_rescues_non_empty_summary(client, db_session, monkeypatch):
+    import app.main as main_module
+
+    class _Engine:
+        def extract_events(self, *_args, **_kwargs):
+            return {"events": [], "email_level_notes": None}
+
+        def extract_summary_candidates(self, *_args, **_kwargs):
+            raise RuntimeError("force deterministic rescue summary")
+
+        def compress_summary(self, summary_context):
+            raise RuntimeError("force deterministic rescue summary")
+
+        def metadata(self):
+            return {"provider": "mock", "model": "test", "prompt_versions": {}}
+
+    monkeypatch.setattr(main_module, "engine_llm", _Engine())
+
+    payload = dict(PAYLOAD_CLEAN)
+    payload["provider_event_id"] = "evt-empty-family-math-1"
+    payload["provider_message_id"] = "msg-empty-family-math-1"
+    payload["subject"] = "Fwd: Family Math Night Tomorrow!"
+    payload["body_text"] = (
+        "---------- Forwarded message ---------\n"
+        "From: Frankland CS <donotreply@tdsb.on.ca>\n"
+        "Date: Tue, Mar 10, 2026 at 8:17 AM\n"
+        "Subject: Family Math Night Tomorrow!\n"
+        "To: <christine.jinae@gmail.com>\n\n"
+        "Dear Grade 1, 2 & 3 Families,\n\n"
+        "Please Join Us for FAMILY MATH NIGHT\n\n"
+        "Please save the date: Wednesday, March 11th, 2026\n\n"
+        "Doors will open at 5:20 pm, and we will begin promptly with a welcome and a brief presentation at 5:30 pm. "
+        "The evening will end at 6:30 pm.\n"
+    )
+
+    response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "ingestion_accepted"
+
+    delivery = db_session.scalar(
+        select(NotificationDelivery).where(NotificationDelivery.household_id == 1, NotificationDelivery.template == "email_analysis_recap")
+    )
+    assert delivery is not None
+    assert "Family Math Night" in delivery.message
+    assert "Mar 11" in delivery.message
+    assert "5:30 PM to 6:30 PM" in delivery.message
+    assert "couldn't extract a clean summary" not in delivery.message
 
 
 def test_begin_forwarded_message_format_detected_for_command_preface(client, db_session, monkeypatch):
     import app.main as main_module
     from datetime import datetime, timedelta, timezone
 
-    seen_parse_inputs: list[str] = []
+    seen_parse_inputs: list[dict] = []
     start = datetime.now(timezone.utc) + timedelta(days=4)
 
     class _Engine:
@@ -803,15 +1113,26 @@ def test_begin_forwarded_message_format_detected_for_command_preface(client, db_
                 "email_level_notes": None,
             }
 
-        def parse_command(self, body_text):
-            seen_parse_inputs.append(body_text)
+        def parse_forwarded_preface_intent(self, *, user_preface, forwarded_subject="", forwarded_sender="", forwarded_date=""):
+            seen_parse_inputs.append(
+                {
+                    "user_preface": user_preface,
+                    "forwarded_subject": forwarded_subject,
+                    "forwarded_sender": forwarded_sender,
+                    "forwarded_date": forwarded_date,
+                }
+            )
             return {
+                "mode": "command",
                 "action": "add",
+                "topic": None,
+                "preference_behavior": None,
                 "pending_id": None,
                 "minutes_before": None,
                 "reminder_channel": None,
                 "async_requested": False,
                 "confidence": 0.99,
+                "reason": "forwarded_preface_add",
             }
 
         def metadata(self):
@@ -835,7 +1156,14 @@ def test_begin_forwarded_message_format_detected_for_command_preface(client, db_
     response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
     assert response.status_code == 200
     assert response.json()["status"] == "command_completed"
-    assert seen_parse_inputs == ["Please add this"]
+    assert seen_parse_inputs == [
+        {
+            "user_preface": "Please add this",
+            "forwarded_subject": "Open House",
+            "forwarded_sender": "Frankland CS <donotreply@tdsb.on.ca>",
+            "forwarded_date": "Tue, Mar 10, 2026 at 8:21 AM",
+        }
+    ]
 
 
 def test_forwarded_footer_does_not_trigger_command_mode(client, db_session, monkeypatch):

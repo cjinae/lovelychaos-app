@@ -152,3 +152,73 @@ def test_build_brief_summary_promotes_grade_specific_events():
     )
 
     assert result.important_dates[0].text.startswith("Oct 16: Gr 1 Riverdale classic cross country race")
+
+
+def test_build_brief_summary_rescues_single_event_email_sections():
+    engine = _FailingSummaryEngine()
+    children = [
+        SimpleNamespace(name="Nolan", school_name="Frankland Community School Junior", grade="1"),
+        SimpleNamespace(name="Jayden", school_name="Frankland Community School Junior", grade="JK"),
+    ]
+    sections = [
+        AnalysisSection(
+            index=1,
+            source_kind="email_body",
+            section_kind="narrative",
+            label="Original email date: Tue, Mar 10, 2026 at 8:17 AM",
+            priority_score=45,
+            text="Original email date: Tue, Mar 10, 2026 at 8:17 AM",
+        ),
+        AnalysisSection(
+            index=2,
+            source_kind="email_body",
+            section_kind="narrative",
+            label="Please Join Us for FAMILY MATH NIGHT",
+            priority_score=10,
+            text="Please Join Us for FAMILY MATH NIGHT",
+        ),
+        AnalysisSection(
+            index=3,
+            source_kind="email_body",
+            section_kind="heading_block",
+            label="Please save the date: Wednesday, March 11th, 2026",
+            priority_score=55,
+            text="Please save the date: Wednesday, March 11th, 2026",
+        ),
+        AnalysisSection(
+            index=4,
+            source_kind="email_body",
+            section_kind="bullet_block",
+            label="Doors will open at 5:20 pm",
+            priority_score=65,
+            text=(
+                "Doors will open at 5:20 pm, and we will begin promptly with a welcome "
+                "and a brief presentation at 5:30 pm. The evening will end at 6:30 pm."
+            ),
+        ),
+    ]
+
+    result, audit_payload = build_brief_summary(
+        engine=engine,
+        subject="Fwd: Family Math Night Tomorrow!",
+        timezone_name="America/Toronto",
+        household_preferences="School closures, PA Days, Pizza Day, Swim schedule",
+        system_defaults={"school_closures": True, "grade_relevant": True},
+        user_priority_topics=["School closures", "PA Days", "Pizza Day", "Swim schedule"],
+        children=children,
+        extracted_events=[],
+        per_event_outcomes=[],
+        sections=sections,
+        analysis_text=(
+            "Original email date: Tue, Mar 10, 2026 at 8:17 AM\n\n"
+            "Please Join Us for FAMILY MATH NIGHT\n\n"
+            "Please save the date: Wednesday, March 11th, 2026\n\n"
+            "Doors will open at 5:20 pm, and we will begin promptly with a welcome and a brief presentation at 5:30 pm. "
+            "The evening will end at 6:30 pm."
+        ),
+        chunk_notes=[],
+    )
+
+    assert "- Mar 11: Family Math Night (5:30 PM to 6:30 PM)" in result.rendered_message
+    assert "I found a school update but couldn't extract a clean summary" not in result.rendered_message
+    assert audit_payload["prefilter"]["kept_sections"]

@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import base64
+from email.utils import parsedate_to_datetime
 from html import unescape
 import hashlib
 import hmac
@@ -206,52 +207,17 @@ def _resolve_and_apply_school_timezone(db: Session, household_id: int, school_na
 @dataclass
 class EmailIntentClassification:
     mode: str
-    command_preface_text: str
+    user_preface_text: str
     forwarded_body_text: str
+    forwarded_subject: str
+    forwarded_sender: str
+    forwarded_date: str
     reason: str
     forwarded_boundary_found: bool
-    explicit_command_pattern: Optional[str] = None
-    ambiguous_pattern: Optional[str] = None
 
-
-_LOW_SIGNAL_PREFACES = {
-    "fyi",
-    "for your information",
-    "for reference",
-    "see below",
-    "see attached",
-    "forwarding",
-}
-_EXPLICIT_COMMAND_PATTERNS = [
-    (
-        "add",
-        re.compile(r"^(?:please\s+)?add\b.*$", re.IGNORECASE),
-    ),
-    (
-        "more_info",
-        re.compile(
-            r"^(?:please\s+)?(?:more info|tell me more|more details|summarize|summary of)\b.*$",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "delete",
-        re.compile(r"^(?:please\s+)?delete\b.*$", re.IGNORECASE),
-    ),
-    (
-        "remind",
-        re.compile(r"^(?:please\s+)?(?:(?:set\s+(?:a\s+)?)?remind|reminder)\b.*$", re.IGNORECASE),
-    ),
-]
-_AMBIGUOUS_PATTERNS = [
-    ("can_you", re.compile(r"\bcan you\b", re.IGNORECASE)),
-    ("could_you", re.compile(r"\bcould you\b", re.IGNORECASE)),
-    ("what_do_you_think", re.compile(r"\bwhat do you think\b", re.IGNORECASE)),
-    ("is_this_important", re.compile(r"\bis this important\b", re.IGNORECASE)),
-    ("do_i_need", re.compile(r"\bdo i need\b", re.IGNORECASE)),
-    ("please_look_at", re.compile(r"\bplease look at\b", re.IGNORECASE)),
-    ("thoughts", re.compile(r"\bthoughts\b", re.IGNORECASE)),
-]
+_PLAIN_EMAIL_COMMAND_MIN_CONFIDENCE = 0.7
+_FORWARDED_COMMAND_MIN_CONFIDENCE = 0.75
+_FORWARDED_CLARIFICATION_MIN_CONFIDENCE = 0.65
 
 
 def _compact_text(value: str) -> str:
@@ -291,6 +257,32 @@ def _find_forward_boundary(lines: list[str]) -> Optional[int]:
     return None
 
 
+def _extract_forwarded_metadata(forwarded_body: str) -> tuple[str, str, str]:
+    forwarded_subject = ""
+    forwarded_sender = ""
+    forwarded_date = ""
+    for raw_line in (forwarded_body or "").replace("\r", "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            if forwarded_subject or forwarded_sender or forwarded_date:
+                break
+            continue
+        if re.match(r"^-+\s*forwarded message\s*-+$", line, flags=re.IGNORECASE):
+            continue
+        if re.match(r"^begin forwarded message:", line, flags=re.IGNORECASE):
+            continue
+        subject_match = re.match(r"^subject:\s*(.+)$", line, flags=re.IGNORECASE)
+        sender_match = re.match(r"^from:\s*(.+)$", line, flags=re.IGNORECASE)
+        date_match = re.match(r"^date:\s*(.+)$", line, flags=re.IGNORECASE)
+        if subject_match:
+            forwarded_subject = subject_match.group(1).strip()
+        elif sender_match:
+            forwarded_sender = sender_match.group(1).strip()
+        elif date_match:
+            forwarded_date = date_match.group(1).strip()
+    return forwarded_subject, forwarded_sender, forwarded_date
+
+
 def _classify_email_intent(body_text: str) -> EmailIntentClassification:
     normalized = (body_text or "").replace("\r", "")
     lines = normalized.splitlines()
@@ -300,60 +292,50 @@ def _classify_email_intent(body_text: str) -> EmailIntentClassification:
     if boundary_idx is None:
         preface_raw = normalized
         forwarded_body = ""
+        forwarded_subject = ""
+        forwarded_sender = ""
+        forwarded_date = ""
     else:
         preface_raw = "\n".join(lines[:boundary_idx])
         forwarded_body = "\n".join(lines[boundary_idx:]).strip()
+        forwarded_subject, forwarded_sender, forwarded_date = _extract_forwarded_metadata(forwarded_body)
 
-    command_preface_text = _normalize_preface_text(preface_raw)
-    compact_preface = _compact_text(command_preface_text)
-    lowered_preface = compact_preface.lower()
+    user_preface_text = _normalize_preface_text(preface_raw)
+    compact_preface = _compact_text(user_preface_text)
 
     if not compact_preface:
         return EmailIntentClassification(
             mode="ingestion",
-            command_preface_text="",
+            user_preface_text="",
             forwarded_body_text=forwarded_body,
+            forwarded_subject=forwarded_subject,
+            forwarded_sender=forwarded_sender,
+            forwarded_date=forwarded_date,
             reason="no_preface",
             forwarded_boundary_found=forwarded_boundary_found,
         )
 
-    if lowered_preface in _LOW_SIGNAL_PREFACES:
+    if not forwarded_boundary_found:
         return EmailIntentClassification(
-            mode="ingestion",
-            command_preface_text=command_preface_text,
-            forwarded_body_text=forwarded_body,
-            reason="low_signal_preface",
-            forwarded_boundary_found=forwarded_boundary_found,
+            mode="command_candidate",
+            user_preface_text=user_preface_text,
+            forwarded_body_text="",
+            forwarded_subject="",
+            forwarded_sender="",
+            forwarded_date="",
+            reason="plain_body_command_candidate",
+            forwarded_boundary_found=False,
         )
 
-    for name, pattern in _EXPLICIT_COMMAND_PATTERNS:
-        if pattern.match(compact_preface):
-            return EmailIntentClassification(
-                mode="command",
-                command_preface_text=command_preface_text,
-                forwarded_body_text=forwarded_body,
-                reason="explicit_command_preface",
-                forwarded_boundary_found=forwarded_boundary_found,
-                explicit_command_pattern=name,
-            )
-
-    for name, pattern in _AMBIGUOUS_PATTERNS:
-        if pattern.search(compact_preface):
-            return EmailIntentClassification(
-                mode="ambiguous",
-                command_preface_text=command_preface_text,
-                forwarded_body_text=forwarded_body,
-                reason="ambiguous_preface",
-                forwarded_boundary_found=forwarded_boundary_found,
-                ambiguous_pattern=name,
-            )
-
     return EmailIntentClassification(
-        mode="ingestion",
-        command_preface_text=command_preface_text if forwarded_boundary_found else "",
+        mode="forwarded_preface_candidate",
+        user_preface_text=user_preface_text,
         forwarded_body_text=forwarded_body,
-        reason="non_actionable_preface" if forwarded_boundary_found else "non_command_body",
-        forwarded_boundary_found=forwarded_boundary_found,
+        forwarded_subject=forwarded_subject,
+        forwarded_sender=forwarded_sender,
+        forwarded_date=forwarded_date,
+        reason="forwarded_preface_candidate",
+        forwarded_boundary_found=True,
     )
 
 
@@ -362,10 +344,69 @@ def _email_intent_metadata(intent: EmailIntentClassification) -> dict:
         "mode": intent.mode,
         "reason": intent.reason,
         "forwarded_boundary_found": intent.forwarded_boundary_found,
-        "preface_char_count": len(intent.command_preface_text),
-        "explicit_command_pattern": intent.explicit_command_pattern,
-        "ambiguous_pattern": intent.ambiguous_pattern,
+        "preface_char_count": len(intent.user_preface_text),
+        "forwarded_subject": intent.forwarded_subject,
+        "forwarded_sender": intent.forwarded_sender,
+        "forwarded_date": intent.forwarded_date,
     }
+
+
+def _should_accept_plain_email_command(command: dict) -> bool:
+    action = str(command.get("action") or "none").strip().lower()
+    if action not in {"add", "more_info", "delete", "remind", "set_preference"}:
+        return False
+    strategy = _command_execution_strategy(command)
+    if not _command_strategy_matches_action(action, strategy):
+        return False
+
+    confidence = float(command.get("confidence") or 0.0)
+    if confidence < _PLAIN_EMAIL_COMMAND_MIN_CONFIDENCE:
+        return False
+
+    topic = str(command.get("topic") or "").strip()
+    preference_behavior = str(command.get("preference_behavior") or "").strip().lower()
+    if action == "set_preference":
+        return bool(topic) and preference_behavior in {"auto_add", "mention", "suppress"}
+    if action == "more_info":
+        return bool(topic)
+    return True
+
+
+def _should_accept_forwarded_command(intent: dict) -> bool:
+    action = str(intent.get("action") or "none").strip().lower()
+    if action not in {"add", "more_info", "delete", "remind", "set_preference"}:
+        return False
+    strategy = _command_execution_strategy(intent)
+    if not _command_strategy_matches_action(action, strategy):
+        return False
+    confidence = float(intent.get("confidence") or 0.0)
+    if confidence < _FORWARDED_COMMAND_MIN_CONFIDENCE:
+        return False
+    topic = str(intent.get("topic") or "").strip()
+    preference_behavior = str(intent.get("preference_behavior") or "").strip().lower()
+    if action == "set_preference":
+        return bool(topic) and preference_behavior in {"auto_add", "mention", "suppress"}
+    return True
+
+
+def _command_execution_strategy(command: dict) -> str:
+    strategy = str(command.get("execution_strategy") or "").strip().lower()
+    if strategy in {"deterministic", "semantic", "none"}:
+        return strategy
+    action = str(command.get("action") or "none").strip().lower()
+    if action in {"add", "delete", "remind", "set_preference"}:
+        return "deterministic"
+    if action == "more_info":
+        return "semantic"
+    return "none"
+
+
+def _command_strategy_matches_action(action: str, strategy: str) -> bool:
+    if action in {"add", "delete", "remind", "set_preference"}:
+        return strategy == "deterministic"
+    if action == "more_info":
+        return strategy == "semantic"
+    return strategy == "none"
 
 
 def _collect_extraction_results(
@@ -1031,8 +1072,8 @@ def _extract_direct_add_candidate(body_text: str, timezone_name: str) -> Optiona
         return None
 
     patterns = [
-        r"^\s*add\s+(?P<title>.+?)\s+to\s+(?:the\s+)?cal(?:endar)?\s+(?:for|on)\s+(?P<date>.+?)\s*$",
-        r"^\s*add\s+(?P<title>.+?)\s+(?:for|on)\s+(?P<date>.+?)\s*$",
+        r"^\s*(?:please\s+)?add\s+(?P<title>.+?)\s+to\s+(?:the\s+)?cal(?:endar)?\s+(?:for|on)\s+(?P<date>.+?)\s*$",
+        r"^\s*(?:please\s+)?add\s+(?P<title>.+?)\s+(?:for|on)\s+(?P<date>.+?)\s*$",
     ]
     for pattern in patterns:
         match = re.match(pattern, raw, re.I)
@@ -1057,6 +1098,345 @@ def _extract_direct_add_candidate(body_text: str, timezone_name: str) -> Optiona
             model_reason="direct_add_command",
         )
     return None
+
+
+def _parse_forwarded_reference_datetime(value: str, timezone_name: str) -> Optional[datetime]:
+    raw = (value or "").replace("\u202f", " ").replace("\xa0", " ").strip()
+    raw = re.sub(r"\s+at\s+(?=\d{1,2}:\d{2}\s*[ap]m\b)", " ", raw, flags=re.I)
+    if not raw:
+        return None
+    try:
+        parsed = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if parsed.tzinfo is None:
+        try:
+            parsed = parsed.replace(tzinfo=ZoneInfo(timezone_name))
+        except Exception:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _extract_time_mentions(text: str) -> list[tuple[int, int]]:
+    seen: set[tuple[int, int]] = set()
+    times: list[tuple[int, int]] = []
+    for match in re.finditer(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text or "", re.I):
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+        meridiem = match.group(3).lower()
+        if meridiem == "pm" and hour != 12:
+            hour += 12
+        if meridiem == "am" and hour == 12:
+            hour = 0
+        key = (hour, minute)
+        if key in seen:
+            continue
+        seen.add(key)
+        times.append(key)
+    times.sort()
+    return times
+
+
+def _extract_date_windows(
+    text: str,
+    *,
+    timezone_name: str,
+    reference_dt: Optional[datetime],
+) -> list[tuple[datetime, datetime]]:
+    zone = ZoneInfo(timezone_name)
+    year_hint = _to_user_timezone(reference_dt, timezone_name).year if reference_dt else datetime.now(zone).year
+    windows: list[tuple[datetime, datetime]] = []
+    seen: set[str] = set()
+    pattern = re.compile(
+        r"\b("
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+        r"aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+        r")\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?\b",
+        re.I,
+    )
+    for match in pattern.finditer(text or ""):
+        month = MONTH_NAME_MAP[match.group(1).lower().rstrip(".")]
+        day = int(match.group(2))
+        year = int(match.group(3)) if match.group(3) else year_hint
+        try:
+            start_local = datetime(year, month, day, 0, 0, tzinfo=zone)
+        except ValueError:
+            continue
+        key = start_local.date().isoformat()
+        if key in seen:
+            continue
+        seen.add(key)
+        windows.append((start_local.astimezone(timezone.utc), (start_local + timedelta(days=1)).astimezone(timezone.utc)))
+
+    normalized = _compact_text(text)
+    if not windows and reference_dt is not None:
+        ref_local = _to_user_timezone(reference_dt, timezone_name)
+        relative_day: Optional[datetime] = None
+        if re.search(r"\btonight\b", normalized, re.I):
+            relative_day = ref_local
+        elif re.search(r"\btomorrow\b", normalized, re.I):
+            relative_day = ref_local + timedelta(days=1)
+        if relative_day is not None:
+            start_local = datetime(relative_day.year, relative_day.month, relative_day.day, 0, 0, tzinfo=zone)
+            windows.append((start_local.astimezone(timezone.utc), (start_local + timedelta(days=1)).astimezone(timezone.utc)))
+    return windows
+
+
+def _with_time_window(
+    start_at: datetime,
+    end_at: datetime,
+    *,
+    timezone_name: str,
+    times: list[tuple[int, int]],
+) -> tuple[datetime, datetime]:
+    if not times:
+        return start_at, end_at
+    zone = ZoneInfo(timezone_name)
+    start_local = _to_user_timezone(start_at, timezone_name)
+    start_hour, start_minute = times[0]
+    end_hour, end_minute = times[-1]
+    start_local = datetime(
+        start_local.year,
+        start_local.month,
+        start_local.day,
+        start_hour,
+        start_minute,
+        tzinfo=zone,
+    )
+    end_local = datetime(
+        start_local.year,
+        start_local.month,
+        start_local.day,
+        end_hour,
+        end_minute,
+        tzinfo=zone,
+    )
+    if end_local <= start_local:
+        end_local = start_local + timedelta(hours=1)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
+def _allows_multiple_add(text: str) -> bool:
+    normalized = _compact_text(text)
+    return bool(re.search(r"\b(these|all|dates|days|both|every)\b", normalized, re.I))
+
+
+def _strip_forwarded_headers(text: str) -> str:
+    lines = (text or "").replace("\r", "").splitlines()
+    if not lines:
+        return ""
+    idx = 0
+    saw_headers = False
+    while idx < len(lines):
+        line = lines[idx].strip()
+        if not line:
+            if saw_headers:
+                idx += 1
+                break
+            idx += 1
+            continue
+        if re.match(r"^-+\s*forwarded message\s*-+$", line, flags=re.IGNORECASE):
+            saw_headers = True
+            idx += 1
+            continue
+        if re.match(r"^begin forwarded message:", line, flags=re.IGNORECASE):
+            saw_headers = True
+            idx += 1
+            continue
+        if re.match(r"^(from|date|subject|to):", line, flags=re.IGNORECASE):
+            saw_headers = True
+            idx += 1
+            continue
+        if saw_headers:
+            break
+        return "\n".join(lines).strip()
+    return "\n".join(lines[idx:]).strip()
+
+
+def _command_topic_tokens(text: Optional[str]) -> list[str]:
+    stopwords = {
+        "add",
+        "calendar",
+        "date",
+        "dates",
+        "day",
+        "days",
+        "event",
+        "events",
+        "please",
+        "this",
+        "these",
+        "that",
+        "those",
+        "the",
+        "to",
+        "all",
+        "both",
+        "every",
+    }
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in re.findall(r"[a-z0-9]+", _compact_text(text), flags=re.I):
+        if len(token) < 3 or token in stopwords or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+    return tokens
+
+
+def _relevant_forwarded_text(content_body_text: str, command_topic: Optional[str]) -> str:
+    body_text = _strip_forwarded_headers(content_body_text)
+    if not body_text:
+        return ""
+    topic_tokens = _command_topic_tokens(command_topic)
+    if not topic_tokens:
+        return body_text
+
+    paragraphs = [chunk.strip() for chunk in re.split(r"\n\s*\n", body_text) if chunk.strip()]
+    matches = [
+        paragraph
+        for paragraph in paragraphs
+        if any(token in _compact_text(paragraph) for token in topic_tokens)
+    ]
+    if matches:
+        return "\n\n".join(matches)
+
+    lines = [line.strip() for line in body_text.splitlines() if line.strip()]
+    line_matches = [line for line in lines if any(token in _compact_text(line) for token in topic_tokens)]
+    if line_matches:
+        return "\n".join(line_matches)
+    return body_text
+
+
+def _normalize_resolved_title(title: str, *, singular: bool) -> str:
+    resolved = (title or "").strip() or "School event"
+    if singular:
+        resolved = re.sub(r"\b(?:dates?|days?)\b\s*$", "", resolved, flags=re.I).strip(" -:")
+        if not resolved:
+            resolved = title.strip() or "School event"
+    if resolved.islower():
+        resolved = resolved.title()
+    return resolved
+
+
+def _resolve_forwarded_add_candidates(
+    *,
+    extracted_events: list[ExtractedEvent],
+    command_topic: Optional[str],
+    content_body_text: str,
+    forwarded_subject: str,
+    forwarded_date: str,
+    timezone_name: str,
+) -> tuple[list[ExtractedEvent], dict]:
+    scoped_body_text = _relevant_forwarded_text(content_body_text, command_topic)
+    combined_text = "\n".join(part for part in [forwarded_subject, scoped_body_text] if part).strip()
+    reference_dt = _parse_forwarded_reference_datetime(forwarded_date, timezone_name)
+    date_windows = _extract_date_windows(combined_text, timezone_name=timezone_name, reference_dt=reference_dt)
+    times = _extract_time_mentions(combined_text)
+    base_title = (command_topic or "").strip() or ((extracted_events[0].title if extracted_events else "") or "").strip()
+    if not base_title:
+        base_title = _display_subject(forwarded_subject or "").strip() or "School event"
+
+    resolved: list[ExtractedEvent] = []
+    extracted_with_dates = [candidate for candidate in extracted_events if candidate.start_at]
+    for candidate in extracted_with_dates:
+        title = (candidate.title or "").strip() or base_title
+        start_at = candidate.start_at
+        end_at = candidate.end_at
+        if start_at and end_at is None:
+            local_start = _to_user_timezone(start_at, timezone_name)
+            if local_start.hour == 0 and local_start.minute == 0:
+                end_at = start_at + timedelta(hours=1)
+            else:
+                end_at = start_at + timedelta(hours=1)
+        elif start_at is not None and start_at.hour == 0 and start_at.minute == 0 and times:
+            start_at, end_at = _with_time_window(start_at, end_at or (start_at + timedelta(hours=1)), timezone_name=timezone_name, times=times)
+        if title and start_at and end_at:
+            resolved.append(
+                ExtractedEvent(
+                    title=title,
+                    start_at=start_at,
+                    end_at=end_at,
+                    category=candidate.category,
+                    confidence=max(candidate.confidence, 0.9),
+                    target_scope=candidate.target_scope,
+                    mentioned_names=list(candidate.mentioned_names or []),
+                    mentioned_schools=list(candidate.mentioned_schools or []),
+                    target_grades=list(candidate.target_grades or []),
+                    preference_match=bool(candidate.preference_match),
+                    model_reason=(candidate.model_reason or "resolved_from_forwarded_context"),
+                )
+            )
+
+    if not resolved and date_windows:
+        singular_title = _normalize_resolved_title(base_title, singular=len(date_windows) > 1)
+        for start_at, end_at in date_windows:
+            if times:
+                actual_start, actual_end = _with_time_window(start_at, end_at, timezone_name=timezone_name, times=times)
+            else:
+                actual_start = start_at
+                actual_end = start_at + timedelta(hours=1)
+            resolved.append(
+                ExtractedEvent(
+                    title=singular_title,
+                    start_at=actual_start,
+                    end_at=actual_end,
+                    category=(extracted_events[0].category if extracted_events else "forwarded"),
+                    confidence=0.9,
+                    target_scope=(extracted_events[0].target_scope if extracted_events else "school_specific"),
+                    mentioned_names=list(extracted_events[0].mentioned_names or []) if extracted_events else [],
+                    mentioned_schools=list(extracted_events[0].mentioned_schools or []) if extracted_events else [],
+                    target_grades=list(extracted_events[0].target_grades or []) if extracted_events else [],
+                    preference_match=bool(extracted_events[0].preference_match) if extracted_events else False,
+                    model_reason="resolved_from_forwarded_dates",
+                )
+            )
+
+    return dedupe_extracted_events(resolved), {
+        "source": "forwarded_date_resolver",
+        "reference_datetime": _serialize_dt(reference_dt),
+        "date_windows": [_serialize_dt(start) for start, _ in date_windows],
+        "times": [f"{hour:02d}:{minute:02d}" for hour, minute in times],
+        "scoped_text": scoped_body_text[:500],
+    }
+
+
+def _past_only_candidates(candidates: list[ExtractedEvent]) -> list[ExtractedEvent]:
+    past: list[ExtractedEvent] = []
+    for candidate in candidates:
+        validation = validate_candidate(candidate)
+        issues = set(validation.get("issues") or [])
+        if "event_in_past" in issues and not (issues - {"event_in_past", "low_confidence"}):
+            past.append(candidate)
+    return past
+
+
+def _build_past_event_message(candidates: list[ExtractedEvent], timezone_name: str) -> str:
+    if len(candidates) == 1:
+        candidate = candidates[0]
+        window = _format_event_window(candidate.start_at, candidate.end_at, timezone_name)
+        title = (candidate.title or "That event").strip()
+        if window:
+            return f"I found {title} on {window}, but it has already passed, so I didn't add it to your calendar."
+        return f"I found {title}, but it has already passed, so I didn't add it to your calendar."
+    items = []
+    for candidate in candidates[:5]:
+        title = (candidate.title or "Untitled event").strip()
+        window = _format_event_window(candidate.start_at, candidate.end_at, timezone_name)
+        items.append(f"{window}: {title}" if window else title)
+    return (
+        "I found these events, but they have already passed, so I didn't add them to your calendar:\n- "
+        + "\n- ".join(items)
+    )
+
+
+def _summary_has_content(summary_result) -> bool:
+    return bool(
+        summary_result.important_dates
+        or summary_result.important_items
+        or summary_result.other_topics
+        or "couldn't extract a clean summary" in (summary_result.rendered_message or "").lower()
+    )
 
 
 def _candidate_from_followup_item(item: dict, timezone_name: str) -> Optional[ExtractedEvent]:
@@ -1102,6 +1482,32 @@ def _create_event_from_candidate(
 ) -> InboundResponse:
     validation = validate_candidate(candidate)
     if not validation["valid"]:
+        issues = set(validation.get("issues") or [])
+        if "event_in_past" in issues and not (issues - {"event_in_past", "low_confidence"}):
+            _audit(
+                db,
+                request_id,
+                user.household_id,
+                "info",
+                inputs,
+                model_output,
+                {"valid": False, "issues": validation.get("issues") or ["event_in_past"]},
+                {"status": "command_noop_past_event", "reason": "event_in_past"},
+                {},
+            )
+            _mark_receipt_processed(receipt)
+            db.commit()
+            return _command_reply(
+                db=db,
+                user=user,
+                channel=response_channel,
+                template="add_past_event",
+                subject=response_subject,
+                status=WebhookStatus.COMMAND_NOOP_PAST_EVENT,
+                message=_build_past_event_message([candidate], user.timezone),
+                request_id=request_id,
+                mutation_executed=False,
+            )
         _audit(
             db,
             request_id,
@@ -1323,6 +1729,9 @@ def _handle_add_command(
     response_subject: str,
     followup_context: Optional[FollowupContext] = None,
     command_topic: Optional[str] = None,
+    command_parse_metadata: Optional[dict] = None,
+    forwarded_subject: str = "",
+    forwarded_date: str = "",
 ) -> InboundResponse:
     inputs = {
         "subject": subject,
@@ -1391,6 +1800,7 @@ def _handle_add_command(
     )
     audit_model_output = {
         "llm": engine_llm.metadata(),
+        "command_parse": command_parse_metadata or None,
         "analysis": {
             "links": candidate_links,
             "link_attempts": [attempt.__dict__ for attempt in link_report.attempts],
@@ -1457,7 +1867,59 @@ def _handle_add_command(
     if chunk_notes:
         audit_model_output["email_level_notes"] = "\n".join(chunk_notes)
 
+    resolved_candidates, resolution_audit = _resolve_forwarded_add_candidates(
+        extracted_events=extracted_events,
+        command_topic=command_topic,
+        content_body_text=content_body_text,
+        forwarded_subject=forwarded_subject or subject,
+        forwarded_date=forwarded_date,
+        timezone_name=user.timezone,
+    )
+    if resolved_candidates:
+        actionable_candidates = []
+        candidate_outcomes = []
+        for candidate in resolved_candidates:
+            validation = validate_candidate(candidate)
+            candidate_outcomes.append(
+                {
+                    "title": candidate.title,
+                    "start_at": _serialize_dt(candidate.start_at),
+                    "end_at": _serialize_dt(candidate.end_at),
+                    "validation": validation,
+                }
+            )
+            if validation["valid"]:
+                actionable_candidates.append(candidate)
+        audit_model_output["resolved_candidates"] = candidate_outcomes
+        audit_model_output["command_resolution"] = resolution_audit
+
     if not actionable_candidates:
+        past_candidates = _past_only_candidates(resolved_candidates or extracted_events)
+        if past_candidates:
+            _audit(
+                db,
+                request_id,
+                user.household_id,
+                "info",
+                inputs,
+                audit_model_output,
+                {"valid": False, "issues": ["event_in_past"]},
+                {"status": "command_noop_past_event", "reason": "event_in_past"},
+                {},
+            )
+            _mark_receipt_processed(receipt)
+            db.commit()
+            return _command_reply(
+                db=db,
+                user=user,
+                channel=response_channel,
+                template="add_past_event",
+                subject=response_subject,
+                status=WebhookStatus.COMMAND_NOOP_PAST_EVENT,
+                message=_build_past_event_message(past_candidates, user.timezone),
+                request_id=request_id,
+                mutation_executed=False,
+            )
         _audit(
             db,
             request_id,
@@ -1484,6 +1946,83 @@ def _handle_add_command(
         )
 
     if len(actionable_candidates) > 1:
+        if _allows_multiple_add(command_topic or raw_body_text):
+            created_titles: list[str] = []
+            skipped_past = _past_only_candidates(resolved_candidates)
+            for candidate in actionable_candidates:
+                single_idem_key = f"{provider_message_id}:add:{candidate.title}:{candidate.start_at}:{candidate.end_at}"
+                existing_idem = db.scalar(
+                    select(IdempotencyKey).where(
+                        IdempotencyKey.key == single_idem_key,
+                        IdempotencyKey.scope == "command",
+                        IdempotencyKey.household_id == user.household_id,
+                    )
+                )
+                if existing_idem:
+                    created_titles.append(candidate.title)
+                    continue
+                gate_response = _tenant_gate_for_calendar_mutation(db, request_id, user.household_id, user.household_id)
+                if gate_response:
+                    return gate_response
+                credential, binding = _resolve_calendar_context_with_refresh(db, user.household_id)
+                calendar_result = calendar_provider.create_event(
+                    access_token=credential.access_token,
+                    calendar_id=binding.calendar_id,
+                    title=candidate.title,
+                    start_at=candidate.start_at,
+                    end_at=candidate.end_at,
+                    timezone=user.timezone,
+                )
+                db.add(
+                    Event(
+                        household_id=user.household_id,
+                        source_message_id=source.id,
+                        title=candidate.title,
+                        start_at=candidate.start_at,
+                        end_at=candidate.end_at,
+                        timezone=user.timezone,
+                        status="calendar_synced",
+                        calendar_event_id=calendar_result.calendar_event_id,
+                    )
+                )
+                db.add(
+                    IdempotencyKey(
+                        key=single_idem_key,
+                        scope="command",
+                        household_id=user.household_id,
+                        action_type="add",
+                        target_ref=candidate.title,
+                        result_hash=_hash_result("calendar_synced"),
+                    )
+                )
+                created_titles.append(candidate.title)
+            _audit(
+                db,
+                request_id,
+                user.household_id,
+                "info",
+                inputs,
+                audit_model_output,
+                {"valid": True},
+                {"status": "command_completed", "reason": "multiple_events_added"},
+                {"events_created": created_titles, "past_events_skipped": [item.title for item in skipped_past]},
+            )
+            _mark_receipt_processed(receipt)
+            db.commit()
+            message = f"Added {len(created_titles)} events to calendar."
+            if skipped_past:
+                message += f" Skipped {len(skipped_past)} past event(s)."
+            return _command_reply(
+                db=db,
+                user=user,
+                channel=response_channel,
+                template="event_created",
+                subject=response_subject,
+                status=WebhookStatus.COMMAND_COMPLETED,
+                message=message,
+                request_id=request_id,
+                mutation_executed=bool(created_titles),
+            )
         _audit(
             db,
             request_id,
@@ -1668,7 +2207,54 @@ def inbound_email(
 
     email_intent = _classify_email_intent(payload.body_text)
 
-    if email_intent.mode == "ambiguous":
+    parsed_email_command = None
+    forwarded_preface_intent = None
+    command_body_text = email_intent.user_preface_text
+    if email_intent.mode == "command_candidate":
+        parse_source_text = email_intent.user_preface_text or payload.body_text
+        try:
+            parsed_email_command = engine_llm.parse_command(parse_source_text)
+        except Exception:
+            parsed_email_command = None
+    elif email_intent.mode == "forwarded_preface_candidate":
+        try:
+            forwarded_preface_intent = engine_llm.parse_forwarded_preface_intent(
+                user_preface=email_intent.user_preface_text,
+                forwarded_subject=email_intent.forwarded_subject,
+                forwarded_sender=email_intent.forwarded_sender,
+                forwarded_date=email_intent.forwarded_date,
+            )
+        except Exception as exc:
+            _audit(
+                db,
+                request_id,
+                user.household_id,
+                "high",
+                payload.model_dump(),
+                {
+                    "llm": engine_llm.metadata(),
+                    "email_intent": _email_intent_metadata(email_intent),
+                },
+                {"valid": False, "issues": ["llm_forwarded_intent_parse_error"]},
+                {"status": "command_parse_error", "detail": exc.__class__.__name__},
+                {},
+            )
+            _mark_receipt_processed(receipt)
+            db.commit()
+            return InboundResponse(
+                status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION.value,
+                message="I saw your note above the forwarded email, but I couldn't interpret the request. Reply with what you'd like me to do.",
+                request_id=request_id,
+                mutation_executed=False,
+                processing_state=ProcessingState.COMPLETED.value,
+            )
+
+    if (
+        email_intent.mode == "forwarded_preface_candidate"
+        and forwarded_preface_intent is not None
+        and forwarded_preface_intent.get("mode") == "clarification"
+        and float(forwarded_preface_intent.get("confidence") or 0.0) >= _FORWARDED_CLARIFICATION_MIN_CONFIDENCE
+    ):
         _audit(
             db,
             request_id,
@@ -1678,6 +2264,7 @@ def inbound_email(
             {
                 "llm": engine_llm.metadata(),
                 "email_intent": _email_intent_metadata(email_intent),
+                "forwarded_preface_intent": forwarded_preface_intent,
             },
             {"valid": False, "issues": ["ambiguous_forwarded_preface"]},
             {"status": "command_needs_clarification", "reason": "ambiguous_forwarded_preface"},
@@ -1693,44 +2280,28 @@ def inbound_email(
             processing_state=ProcessingState.COMPLETED.value,
         )
 
-    if email_intent.mode == "command":
+    should_run_command = (
+        email_intent.mode == "command_candidate"
+        and parsed_email_command is not None
+        and _should_accept_plain_email_command(parsed_email_command)
+    ) or (
+        email_intent.mode == "forwarded_preface_candidate"
+        and forwarded_preface_intent is not None
+        and forwarded_preface_intent.get("mode") == "command"
+        and _should_accept_forwarded_command(forwarded_preface_intent)
+    )
+
+    if should_run_command:
         response_channel = resolve_response_channel(
             origin_channel="email",
-            email_intent_mode=email_intent.mode,
+            email_intent_mode="command",
             admin_phone=user.phone,
         )
         response_subject = _reply_subject(payload.subject)
-        try:
-            command = engine_llm.parse_command(email_intent.command_preface_text)
-        except Exception as exc:
-            _audit(
-                db,
-                request_id,
-                user.household_id,
-                "high",
-                payload.model_dump(),
-                {
-                    "llm": engine_llm.metadata(),
-                    "email_intent": _email_intent_metadata(email_intent),
-                },
-                {"valid": False, "issues": ["llm_command_parse_error"]},
-                {"status": "command_parse_error", "detail": exc.__class__.__name__},
-                {},
-            )
-            _mark_receipt_processed(receipt)
-            db.commit()
-            return _command_reply(
-                db=db,
-                user=user,
-                channel=response_channel,
-                template="command_clarification",
-                subject=response_subject,
-                status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-                message="Unable to parse command. Please clarify and retry.",
-                request_id=request_id,
-                mutation_executed=False,
-            )
-        if command["action"] == "add":
+        command = parsed_email_command or forwarded_preface_intent or {}
+        strategy = _command_execution_strategy(command)
+
+        if strategy == "deterministic" and command["action"] == "add":
             followup_context = load_active_followup_context(
                 db,
                 household_id=user.household_id,
@@ -1744,14 +2315,17 @@ def inbound_email(
                 receipt=receipt,
                 provider_message_id=payload.provider_message_id,
                 subject=payload.subject,
-                raw_body_text=email_intent.command_preface_text or payload.body_text,
+                raw_body_text=command_body_text or payload.body_text,
                 analysis_body_text=email_intent.forwarded_body_text or payload.body_text,
                 response_channel=response_channel,
                 response_subject=response_subject,
                 followup_context=followup_context,
                 command_topic=command.get("topic"),
+                command_parse_metadata=command,
+                forwarded_subject=email_intent.forwarded_subject,
+                forwarded_date=email_intent.forwarded_date,
             )
-        if command["action"] == "more_info":
+        if strategy == "semantic" and command["action"] == "more_info":
             context = load_active_followup_context(
                 db,
                 household_id=user.household_id,
@@ -1776,7 +2350,7 @@ def inbound_email(
                 mutation_executed=False,
             )
 
-        if command["action"] == "set_preference":
+        if strategy == "deterministic" and command["action"] == "set_preference":
             return _handle_set_preference_command(
                 db=db,
                 request_id=request_id,
@@ -1788,7 +2362,7 @@ def inbound_email(
                 preference_behavior=command.get("preference_behavior"),
             )
 
-        if command["action"] == "delete":
+        if strategy == "deterministic" and command["action"] == "delete":
             event_id = command["pending_id"]
             if event_id is None:
                 _mark_receipt_processed(receipt)
@@ -1915,7 +2489,7 @@ def inbound_email(
                 mutation_executed=True,
             )
 
-        if command["action"] == "remind":
+        if strategy == "deterministic" and command["action"] == "remind":
             return _handle_reminder_command(
                 db=db,
                 request_id=request_id,
@@ -1936,7 +2510,7 @@ def inbound_email(
             template="command_clarification",
             subject=response_subject,
             status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-            message="Unsupported command for this flow.",
+            message="I understood the request, but this command needs a different follow-up flow.",
             request_id=request_id,
             mutation_executed=False,
         )
@@ -1988,6 +2562,7 @@ def inbound_email(
             {
                 "llm": engine_llm.metadata(),
                 "email_intent": _email_intent_metadata(email_intent),
+                "forwarded_preface_intent": forwarded_preface_intent,
                 "analysis": analysis_audit,
             },
             {"valid": False, "issues": ["llm_extraction_error"]},
@@ -1998,6 +2573,93 @@ def inbound_email(
         db.commit()
         return _safe_error(WebhookStatus.REJECTED_VALIDATION, request_id, "Could not validate event details.")
     if not extracted_events:
+        summary_result, summary_audit = build_brief_summary(
+            engine=engine_llm,
+            subject=payload.subject,
+            timezone_name=user.timezone,
+            household_preferences=preference_text,
+            system_defaults={item["key"]: bool(item["enabled"]) for item in priority_preferences["system_defaults"]},
+            user_priority_topics=list(priority_preferences["user_priority_topics"]),
+            children=children,
+            extracted_events=[],
+            per_event_outcomes=[],
+            sections=sections,
+            analysis_text=analysis_text,
+            chunk_notes=chunk_notes,
+        )
+        if _summary_has_content(summary_result):
+            response_channel = resolve_response_channel(
+                origin_channel="email",
+                email_intent_mode=email_intent.mode,
+                admin_phone=user.phone,
+            )
+            db.add(
+                InformationalItem(
+                    household_id=user.household_id,
+                    source_message_id=source.id,
+                    title=summary_result.title or _display_subject(payload.subject),
+                    details=summary_result.rendered_message,
+                    priority=0,
+                    status="stored",
+                )
+            )
+            _mark_receipt_processed(receipt)
+            _send_user_response(
+                db=db,
+                user=user,
+                channel=response_channel,
+                template="email_analysis_recap",
+                subject=f"LovelyChaos: {_display_subject(payload.subject)}",
+                message=summary_result.rendered_message,
+            )
+            persist_followup_context(
+                db,
+                household_id=user.household_id,
+                source_message_id=source.id,
+                origin_channel="email",
+                response_channel=response_channel,
+                thread_or_conversation_key=payload.provider_message_id,
+                summary_title=summary_result.title,
+                summary_items_shown=[
+                    *[item.as_dict() for item in summary_result.important_dates],
+                    *[item.as_dict() for item in summary_result.important_items],
+                    *[item.as_dict() for item in summary_result.other_topics],
+                ],
+                all_extracted_items=[],
+                section_snippets=[
+                    {
+                        "label": item.get("label"),
+                        "text": item.get("text"),
+                    }
+                    for item in list(summary_audit.get("prefilter", {}).get("kept_sections") or [])
+                    if item.get("text")
+                ],
+            )
+            _audit(
+                db,
+                request_id,
+                user.household_id,
+                "info",
+                payload.model_dump(),
+                {
+                    "llm": engine_llm.metadata(),
+                    "email_intent": _email_intent_metadata(email_intent),
+                    "forwarded_preface_intent": forwarded_preface_intent,
+                    "analysis": analysis_audit,
+                    "summary": summary_audit,
+                },
+                {"valid": True, "issues": ["empty_extraction_informational_fallback"]},
+                {"status": "processed", "counts": {"create_event": 0, "pending_event": 0, "informational_item": 1}},
+                {"informational_fallback": "stored"},
+            )
+            db.commit()
+            return InboundResponse(
+                status=WebhookStatus.INGESTION_ACCEPTED.value,
+                message="Relevant school updates were summarized for follow-up.",
+                request_id=request_id,
+                mutation_executed=False,
+                processing_state=ProcessingState.COMPLETED.value,
+            )
         _audit(
             db,
             request_id,
@@ -2007,6 +2669,7 @@ def inbound_email(
             {
                 "llm": engine_llm.metadata(),
                 "email_intent": _email_intent_metadata(email_intent),
+                "forwarded_preface_intent": forwarded_preface_intent,
                 "analysis": analysis_audit,
             },
             {"valid": False, "issues": ["empty_extraction"]},
@@ -2247,6 +2910,7 @@ def inbound_email(
     model_output = {
         "llm": engine_llm.metadata(),
         "email_intent": _email_intent_metadata(email_intent),
+        "forwarded_preface_intent": forwarded_preface_intent,
         "events": [{"title": e.title, "confidence": e.confidence} for e in extracted_events],
         "email_level_notes": "\n".join(chunk_notes) if chunk_notes else None,
         "analysis": analysis_audit,
@@ -2680,7 +3344,22 @@ def inbound_sms(
             mutation_executed=False,
         )
 
-    if command["action"] == "more_info":
+    strategy = _command_execution_strategy(command)
+    if not _command_strategy_matches_action(command["action"], strategy):
+        db.commit()
+        return _command_reply(
+            db=db,
+            user=user,
+            channel="sms",
+            template="command_clarification",
+            subject="LovelyChaos SMS",
+            status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+            message="I understood the request, but this command needs a different follow-up flow.",
+            request_id=request_id,
+            mutation_executed=False,
+        )
+
+    if strategy == "semantic" and command["action"] == "more_info":
         context = load_active_followup_context(db, household_id=user.household_id, response_channel="sms")
         _mark_receipt_processed(receipt)
         db.commit()
@@ -2701,7 +3380,7 @@ def inbound_sms(
             mutation_executed=False,
         )
 
-    if command["action"] == "set_preference":
+    if strategy == "deterministic" and command["action"] == "set_preference":
         return _handle_set_preference_command(
             db=db,
             request_id=request_id,
@@ -2713,7 +3392,7 @@ def inbound_sms(
             preference_behavior=command.get("preference_behavior"),
         )
 
-    if command["action"] == "delete":
+    if strategy == "deterministic" and command["action"] == "delete":
         event_id = command["pending_id"]
         if event_id is None:
             _mark_receipt_processed(receipt)
@@ -2798,7 +3477,7 @@ def inbound_sms(
             mutation_executed=True,
         )
 
-    if command["action"] == "remind":
+    if strategy == "deterministic" and command["action"] == "remind":
         return _handle_reminder_command(
             db=db,
             request_id=request_id,
@@ -2825,6 +3504,7 @@ def inbound_sms(
         response_subject="LovelyChaos SMS",
         followup_context=followup_context,
         command_topic=command.get("topic"),
+        command_parse_metadata=command,
     )
 
 

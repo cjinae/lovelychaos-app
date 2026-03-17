@@ -3,6 +3,7 @@ from datetime import timezone
 from app.services.llm import (
     COMMAND_SYSTEM_PROMPT,
     EXTRACTION_SYSTEM_PROMPT,
+    FORWARDED_INTENT_SYSTEM_PROMPT,
     OpenAIDecisionEngine,
 )
 
@@ -30,7 +31,8 @@ class _MockClient:
 
     def post(self, url, headers=None, json=None):  # noqa: A002
         assert url.endswith("/chat/completions")
-        if "event extraction engine" in json["messages"][0]["content"].lower():
+        system_prompt = json["messages"][0]["content"].lower()
+        if "event extraction engine" in system_prompt:
             return _MockResponse(
                 {
                     "choices": [
@@ -49,13 +51,30 @@ class _MockClient:
                     ]
                 }
             )
+        if "forwarded-email intent parser" in system_prompt:
+            return _MockResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"mode":"command","action":"add","topic":null,"preference_behavior":null,'
+                                    '"execution_strategy":"deterministic",'
+                                    '"minutes_before":null,"reminder_channel":null,"async_requested":false,'
+                                    '"confidence":0.95,"reason":"preface_supported_action"}'
+                                )
+                            }
+                        }
+                    ]
+                }
+            )
         return _MockResponse(
             {
                 "choices": [
                     {
                         "message": {
                             "content": (
-                                '{"action":"more_info","pending_id":null,"topic":"Pizza Lunch","minutes_before":30,'
+                                '{"action":"more_info","execution_strategy":"semantic","pending_id":null,"topic":"Pizza Lunch","minutes_before":30,'
                                 '"reminder_channel":"sms","async_requested":false,"confidence":0.96}'
                             )
                         }
@@ -87,9 +106,20 @@ def test_openai_engine_extract_and_command(monkeypatch):
 
     command = engine.parse_command("more info about Pizza Lunch")
     assert command["action"] == "more_info"
+    assert command["execution_strategy"] == "semantic"
     assert command["pending_id"] is None
     assert command["topic"] == "Pizza Lunch"
     assert command["minutes_before"] == 30
+
+    forwarded_intent = engine.parse_forwarded_preface_intent(
+        user_preface="Add this to the calendar",
+        forwarded_subject="Pizza Lunch",
+        forwarded_sender="Frankland CS <donotreply@tdsb.on.ca>",
+        forwarded_date="Tue, Mar 10, 2026 at 8:21 AM",
+    )
+    assert forwarded_intent["mode"] == "command"
+    assert forwarded_intent["action"] == "add"
+    assert forwarded_intent["execution_strategy"] == "deterministic"
 
 
 def test_openai_engine_defaults_end_at_when_missing(monkeypatch):
@@ -147,8 +177,12 @@ def test_prompt_constants_are_explicit():
     assert "<output_contract>" in EXTRACTION_SYSTEM_PROMPT
     assert "<verification_loop>" in EXTRACTION_SYSTEM_PROMPT
     assert "Allowed actions only" in COMMAND_SYSTEM_PROMPT
+    assert "Allowed execution strategies only" in COMMAND_SYSTEM_PROMPT
     assert "<decision_rules>" in COMMAND_SYSTEM_PROMPT
     assert "more_info" in COMMAND_SYSTEM_PROMPT
+    assert "Allowed modes only" in FORWARDED_INTENT_SYSTEM_PROMPT
+    assert "Allowed execution strategies only" in FORWARDED_INTENT_SYSTEM_PROMPT
+    assert "Treat `user_preface` as the only user-authored intent text" in FORWARDED_INTENT_SYSTEM_PROMPT
 
 
 def test_openai_engine_does_not_fallback_to_mock_when_model_returns_no_events(monkeypatch):
