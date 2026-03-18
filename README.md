@@ -1,35 +1,111 @@
-# LovelyChaos Phase 1
+# LovelyChaos
 
-Phase 1 implementation for:
-- Email-first ingestion and command handling
-- Deterministic attribution fail-closed gates
-- LLM decision interface + deterministic validation/routing
-- Pending decisions and operation tracking
-- Minimal Admin Console
-- Mandatory automated testing and CI gates
+LovelyChaos is a FastAPI app for handling school communication on behalf of a family. It ingests inbound email and SMS, extracts the parts that matter, turns clear schedule items into calendar actions, stores informational updates for digesting, and keeps enough conversational context to support follow-up replies like "tell me more", "add this", "delete 42", or "please keep adding pizza lunches".
+
+The current product is no longer a "Phase 1" stub. The codebase now includes live provider integrations, a real onboarding/admin surface, preference-aware summarization, teacher-contact matching, PDF/attachment processing, Google Calendar OAuth, and SMS follow-up flows.
+
+## Current product surface
+
+- Inbound channels:
+  - Email via `POST /webhooks/email/inbound`
+  - Resend inbound email via `POST /webhooks/resend/inbound`
+  - SMS via `POST /webhooks/sms/inbound`
+  - Twilio inbound SMS via `POST /webhooks/twilio/sms`
+- Fail-closed attribution:
+  - verified admin email is required for email commands and ingestion
+  - verified primary admin phone is required for SMS
+  - ambiguous senders are rejected
+- School-update processing:
+  - extracts structured events and informational items from school emails
+  - handles forwarded teacher emails and preserves original sender/date context
+  - downloads supported SchoolMessenger PDF attachments and extracts text
+  - can fall back to OpenAI-powered OCR for weak PDF text extraction
+- Decisioning and summarization:
+  - combines deterministic policy logic with LLM extraction/parsing
+  - builds concise recaps with important dates, important items, and other topics
+  - uses a local redacted school-communication corpus to improve summary context
+  - respects household priority defaults, explicit preference notes, and command-written preference rules
+- Calendar behavior:
+  - auto-adds clear, relevant events such as closures/breaks and household-specific preference events
+  - holds ambiguous or incomplete items for follow-up instead of guessing
+  - supports add, delete, and reminder workflows
+  - supports mock and live Google Calendar providers
+- Conversational follow-up:
+  - email and SMS can request `add`, `more_info`, `delete`, `remind`, and `set_preference`
+  - SMS keeps short-lived numbered disambiguation state when a reply could refer to multiple recent items
+  - follow-up context is persisted so later replies can resolve "this", topic names, or numbered selections
+- Operator surfaces:
+  - onboarding flow for family profile, children, schools, priority profile, and calendar connection
+  - admin console for settings, children, teacher contacts, preferences, calendar binding, digests, notifications, and inbound activity
+  - design-language and architecture-diagram pages for internal review
 
 ## Stack
+
 - FastAPI
 - SQLAlchemy
-- SQLite (local/dev), Postgres via `DATABASE_URL` in deployment
+- SQLite for local development, Postgres via `DATABASE_URL` in deployment
+- Jinja templates for onboarding/admin UI
+- OpenAI Responses API for live extraction, command parsing, preference parsing, summary compression, and PDF OCR
+- Google Calendar API for live calendar mutations
+- Resend for inbound email normalization and live outbound email
+- Twilio for inbound and outbound SMS
 
 ## Run locally
 
 ```bash
 python3 -m pip install -e '.[dev]'
 make db-upgrade
-uvicorn app.main:app --reload
+python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-## Environment variables (.env)
-- Copy `.env.example` to `.env` and fill in your secrets.
-- The app now auto-loads `.env` at startup.
-- `.env` is gitignored.
-- Set `ADMIN_API_KEY` to require `X-Admin-Key` on all `/internal/*` endpoints.
-- Set `RESEND_WEBHOOK_SECRET` to verify Resend webhook signatures on `POST /webhooks/resend/inbound`.
-- LLM mode defaults to `mock`; set `LLM_MODE=openai` with `OPENAI_API_KEY` to use live OpenAI prompts.
+Useful local pages:
 
-## Database migrations
+- `http://127.0.0.1:8000/onboarding`
+- `http://127.0.0.1:8000/admin`
+- `http://127.0.0.1:8000/architecture-diagrams`
+
+## Environment variables
+
+Copy `.env.example` to `.env`. The app auto-loads `.env` at startup.
+
+Core:
+
+- `DATABASE_URL`
+- `WEBHOOK_SECRET`
+- `ADMIN_API_KEY` to require `X-Admin-Key` on `/internal/*`
+
+LLM:
+
+- `LLM_MODE=mock|openai`
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
+- `OPENAI_REASONING_EFFORT`
+- `OPENAI_TRACING_ENABLED`
+- `OPENAI_TIMEOUT_SEC`
+- `OPENAI_BASE_URL`
+
+Calendar:
+
+- `GOOGLE_CALENDAR_MODE=mock|live`
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_OAUTH_REDIRECT_URI`
+
+Notifications and provider webhooks:
+
+- `NOTIFICATION_MODE=mock|live`
+- `RESEND_API_KEY`
+- `RESEND_FROM_EMAIL`
+- `RESEND_WEBHOOK_SECRET`
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
+- `TWILIO_MESSAGING_SERVICE_SID` or `TWILIO_PHONE_NUMBER`
+
+Testing override:
+
+- `LOCAL_TEST_RESPONSE_CHANNEL_OVERRIDE`
+
+## Migrations
 
 ```bash
 make db-upgrade
@@ -37,90 +113,116 @@ make db-downgrade
 make db-revision m="describe change"
 ```
 
-## Core endpoints
+Recent schema changes in the current product include SMS conversation state, teacher contacts, and removal of older batch/pending routing concepts.
+
+## Main routes
+
+Inbound and command processing:
+
 - `POST /webhooks/email/inbound`
 - `POST /webhooks/resend/inbound`
 - `POST /webhooks/sms/inbound`
 - `POST /webhooks/twilio/sms`
 - `GET /operations/{operation_id}`
 - `POST /internal/operations/{operation_id}/run`
-- `POST /internal/jobs/expire`
+
+Jobs and platform ops:
+
 - `POST /internal/jobs/retention`
 - `POST /internal/jobs/daily-summary`
 - `POST /internal/jobs/weekly-digest`
 - `POST /internal/google/refresh`
 - `GET /health`
 - `GET /ready`
-- `GET /admin`
-- `GET /admin/activity`
-- `GET /admin/inbound-activity`
-- `GET /onboarding`
+
+Google Calendar OAuth:
+
+- `GET /auth/google/start`
+- `GET /oauth/google/callback`
+
+Admin JSON APIs:
+
 - `GET/PUT /admin/profile`
 - `GET/PUT /admin/settings`
 - `GET/POST /admin/children`
+- `GET /admin/schools/search`
+- `GET /admin/schools/resolve`
 - `GET/PUT /admin/preferences`
 - `GET/PUT /admin/calendar-binding`
-- `GET /admin/pending-events`
-- `GET /admin/reminders`
-- `POST /admin/reminders`
+- `GET/POST /admin/reminders`
 - `GET /admin/notifications`
 - `GET /admin/digests`
-- `POST /admin/pending-events/{id}/confirm`
-- `POST /admin/pending-events/{id}/reject`
+- `GET /admin/inbound-activity`
 
-## Test and CI gates
+HTML surfaces:
+
+- `GET /`
+- `GET /admin`
+- `GET /admin/activity`
+- `GET /onboarding`
+- `GET /onboarding/design-gallery`
+- `GET /onboarding/v1`
+- `GET /onboarding/v2`
+- `GET /onboarding/v3`
+- `GET /design-language`
+- `GET /architecture-diagrams`
+
+## Supported follow-up commands
+
+Examples the current parser handles:
+
+- `add this to the calendar`
+- `please add Family Field Trip to the calendar for May 9, 2026`
+- `tell me more about Space Pirates musical`
+- `delete 42`
+- `remind 42 30m sms`
+- `remind 42 45m calendar`
+- `please keep adding pizza lunches`
+- `I don't care about school council events`
+
+Supported actions are:
+
+- `add`
+- `more_info`
+- `delete`
+- `remind`
+- `set_preference`
+
+Older "confirm" style commands are not part of the current command model.
+
+## Integration notes
+
+LLM modes:
+
+- `LLM_MODE=mock` uses deterministic local logic for extraction and command parsing.
+- `LLM_MODE=openai` uses the OpenAI Responses API with strict JSON-schema outputs.
+
+Google Calendar modes:
+
+- `GOOGLE_CALENDAR_MODE=mock` avoids live Google API calls.
+- `GOOGLE_CALENDAR_MODE=live` performs real calendar mutations and refreshes stored tokens when possible.
+
+Notification modes:
+
+- `NOTIFICATION_MODE=mock` records deterministic outbound deliveries.
+- `NOTIFICATION_MODE=live` sends email through Resend and SMS through Twilio.
+
+Resend inbound webhook:
+
+- Configure Resend to call `POST /webhooks/resend/inbound`.
+- The handler normalizes common inbound payload shapes.
+- If `RESEND_WEBHOOK_SECRET` is set, Svix headers are verified. Local fallback also supports `X-Resend-Signature`.
+
+Twilio inbound SMS webhook:
+
+- Configure Twilio to call `POST /webhooks/twilio/sms`.
+- Twilio form fields are normalized into the shared SMS command pipeline.
+- If `TWILIO_AUTH_TOKEN` is set, `X-Twilio-Signature` is required.
+
+## Testing
 
 ```bash
 make ci
 ```
 
 See `TESTING.md` for suite definitions and merge policy.
-
-## Notes
-- Async command operations use bounded completion-notification retries (max 3 attempts).
-- `GET /operations/{operation_id}` remains queryable after retry exhaustion.
-- Phase 2 adds Google Calendar mutation support (create/delete) with strict commit-time tenant gating.
-- Phase 2 now includes SMS command channel with ambiguous-phone fail-closed routing and spouse receive-only enforcement.
-- Reminder commands are supported via email and SMS (`remind <event_id> <minutes>m sms|calendar`).
-- Daily summary and weekly digest jobs are available and respect household toggle settings.
-
-## Google Calendar modes
-- `GOOGLE_CALENDAR_MODE=mock` (default): deterministic local testing, no Google API call.
-- `GOOGLE_CALENDAR_MODE=live`: calls Google Calendar REST API using stored access token and calendar binding.
-- Access tokens are auto-refreshed before calendar mutations when `token_expiry` is near/past expiry and a `refresh_token` is available.
-
-## Notification modes
-- `NOTIFICATION_MODE=mock` (default): deterministic outbound notification simulation with delivery logs.
-- `NOTIFICATION_MODE=live`: uses Resend for admin email delivery and Twilio for SMS delivery.
-- Twilio env vars for live SMS:
-  - `TWILIO_ACCOUNT_SID`
-  - `TWILIO_AUTH_TOKEN`
-  - `TWILIO_MESSAGING_SERVICE_SID` or `TWILIO_PHONE_NUMBER`
-- Household mutation notifications now fan out to the admin by email and SMS when an admin phone is configured.
-
-## LLM modes
-- `LLM_MODE=mock` (default): deterministic local parser/classifier.
-- `LLM_MODE=openai`: uses OpenAI strict JSON prompts for extraction and command parsing.
-- Recommended OpenAI vars:
-  - `OPENAI_API_KEY`
-  - `OPENAI_MODEL=gpt-4.1-mini`
-  - `OPENAI_TIMEOUT_SEC=20`
-  - `OPENAI_BASE_URL=https://api.openai.com/v1`
-
-Prompt transparency:
-- Extraction and command system prompts are defined in [app/services/llm.py](/Users/jinaelee/projects/lovelychaos/app/services/llm.py) as constants (`EXTRACTION_SYSTEM_PROMPT`, `COMMAND_SYSTEM_PROMPT`).
-
-## Resend inbound webhook
-- Configure Resend inbound webhook target to `POST /webhooks/resend/inbound`.
-- Supported input fields are normalized from common Resend webhook payload shapes (`type`, `data.from`, `data.to`, `data.subject`, `data.text`).
-- In production, the endpoint verifies Resend's Svix signature headers (`svix-id`, `svix-timestamp`, `svix-signature`) using `RESEND_WEBHOOK_SECRET`.
-- Local/dev fallback supports `X-Resend-Signature` equal to `RESEND_WEBHOOK_SECRET`.
-
-## Twilio inbound SMS webhook
-- Configure your Twilio Messaging webhook target to `POST /webhooks/twilio/sms`.
-- The endpoint normalizes Twilio form fields (`MessageSid`, `From`, `To`, `Body`) into the existing SMS command pipeline.
-- If `TWILIO_AUTH_TOKEN` is set, inbound requests require a valid `X-Twilio-Signature`.
-
-## Internal endpoints auth
-- If `ADMIN_API_KEY` is unset/empty, `/internal/*` endpoints are open for local development.
-- If `ADMIN_API_KEY` is set, include `X-Admin-Key: <your-key>` on every `/internal/*` request.
