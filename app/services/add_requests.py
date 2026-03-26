@@ -213,7 +213,6 @@ def resolve_calendar_add_candidates(
         timezone_name,
         reference_datetime_hint=extraction_result.reference_datetime_hint,
     )
-    validation_outcomes = _validation_outcomes(extracted_events, validate_candidate_fn, serialize_dt_fn)
     resolved_candidates, resolution_audit = resolve_forwarded_add_candidates_fn(
         extracted_events=extracted_events,
         command_topic=resolved_command_topic,
@@ -285,12 +284,6 @@ def resolve_add_request_from_context(
         build_candidate_clarification_fn=build_candidate_clarification_fn,
     )
     resolved_command_topic = (command_topic or "").strip() or fallback_command_topic_fn(raw_body_text) or None
-    inputs = {
-        "subject": subject,
-        "body_text": raw_body_text,
-        "command_topic": resolved_command_topic,
-        "response_channel": response_channel,
-    }
     audit_payload = {
         "analysis": dict(extraction_result.analysis_audit),
         "command_resolution": candidate_result.resolution_audit,

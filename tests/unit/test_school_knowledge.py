@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from app.services import school_knowledge
 from app.services.llm import ExtractedEvent

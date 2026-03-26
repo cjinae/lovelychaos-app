@@ -3,7 +3,6 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from app.services.brief_summary import (
-    _candidate_summary_lines_for_upgrade,
     _normalize_compressed_summary,
     _absolute_date_from_text,
     _prune_redundant_dated_candidates,

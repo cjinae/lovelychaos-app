@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass

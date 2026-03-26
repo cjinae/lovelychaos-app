@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from app.main import calendar_provider
 from app.models import Event, SourceMessage
 from tests.fixtures import PAYLOAD_CLEAN
 

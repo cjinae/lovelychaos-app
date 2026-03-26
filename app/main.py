@@ -115,7 +115,6 @@ from app.services.followups import (
     resolve_response_channel,
     resolve_sms_conversation_state,
     retrieve_more_info_source_snippets,
-    select_more_info_snippets,
 )
 from app.services.google_auth import GoogleAuthError, refresh_google_access_token, should_refresh_token
 from app.services.llm import CommandToolRuntime, ExtractedEvent, MockDecisionEngine, OpenAIDecisionEngine
