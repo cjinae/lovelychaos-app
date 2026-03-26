@@ -7,6 +7,7 @@ from tests.fixtures import PAYLOAD_CLEAN
 
 
 def test_actionable_event_syncs_calendar(client, db_session):
+    # Auto-add is globally disabled; inbound events are held for explicit user confirmation.
     payload = dict(PAYLOAD_CLEAN)
     payload["provider_event_id"] = "evt-calendar-a"
     payload["provider_message_id"] = "msg-calendar-a"
@@ -17,9 +18,7 @@ def test_actionable_event_syncs_calendar(client, db_session):
     assert response.json()["status"] == "ingestion_accepted"
 
     event = db_session.scalar(select(Event).where(Event.title == "School Closure Alert"))
-    assert event is not None
-    assert event.status == "calendar_synced"
-    assert event.calendar_event_id is not None
+    assert event is None
 
 
 def test_calendar_sync_failure_leaves_no_event_and_returns_ingestion_success(client, db_session):

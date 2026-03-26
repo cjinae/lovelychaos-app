@@ -50,10 +50,10 @@ def test_calendar_mutation_auto_refreshes_expired_token(client, db_session, monk
     assert response.status_code == 200
     assert response.json()["status"] == "ingestion_accepted"
 
-    db_session.refresh(credential)
-    assert credential.access_token == "refreshed-for-mutation"
-
+    # Auto-add is globally disabled; no calendar mutation occurs on inbound, so no token refresh.
     message = db_session.scalar(select(SourceMessage).where(SourceMessage.provider_message_id == "msg-refresh-mutation"))
     assert message is not None
     event = db_session.scalar(select(Event).where(Event.source_message_id == message.id))
-    assert event is not None
+    assert event is None
+    db_session.refresh(credential)
+    assert credential.access_token == "mock-access-token"

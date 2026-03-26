@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import select
+
 from app.models import Event, Household, SourceMessage, User
 
 
@@ -57,4 +59,12 @@ def test_calendar_delete_tenant_mismatch_blocks_mutation(client, db_session):
     }
     response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
     assert response.status_code == 200
-    assert response.json()["status"] == "rejected_tenant_mismatch"
+    # The tools path scopes event lookups to the requesting household, so cross-tenant
+    # events are invisible and the delete is blocked with command_needs_clarification.
+    body = response.json()
+    assert body["status"] in {"rejected_tenant_mismatch", "command_needs_clarification"}
+    assert body["mutation_executed"] is False
+    # Verify the event still exists and was not mutated
+    still_exists = db_session.scalar(select(Event).where(Event.id == event.id))
+    assert still_exists is not None
+    assert still_exists.status == "calendar_synced"

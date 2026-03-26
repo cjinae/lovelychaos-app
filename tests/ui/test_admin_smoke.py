@@ -7,7 +7,7 @@ def test_admin_page_renders(client):
 def test_onboarding_page_renders(client):
     response = client.get("/onboarding")
     assert response.status_code == 200
-    assert "LovelyChaos Onboarding" in response.text
+    assert "LovelyChaos Setup" in response.text
     assert "/admin/schools/search" in response.text
 
 

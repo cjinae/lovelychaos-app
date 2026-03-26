@@ -307,10 +307,11 @@ def test_multi_event_independent_routing(client, db_session, monkeypatch):
     assert response.status_code == 200
     assert response.json()["status"] == "ingestion_accepted"
 
+    # Auto-add disabled; no events auto-created. Items go to followup or informational.
     events = db_session.scalars(select(Event).where(Event.household_id == 1)).all()
     info = db_session.scalars(select(InformationalItem).where(InformationalItem.household_id == 1)).all()
     followup = db_session.scalar(select(FollowupContext).where(FollowupContext.household_id == 1))
-    assert len(events) >= 1
+    assert len(events) == 0
     assert len(info) >= 1
     assert followup is not None
 
@@ -401,8 +402,9 @@ def test_forwarded_teacher_email_uses_original_sender_and_reference_date_for_aut
     assert response.json()["status"] == "ingestion_accepted"
     assert captured["reference_datetime_hint"] == "2026-03-01T23:53:00+00:00"
 
+    # Auto-add disabled; event is held for explicit confirmation rather than auto-created.
     event = db_session.scalar(select(Event).where(Event.household_id == 1, Event.title == "Swim Day"))
-    assert event is not None
+    assert event is None
 
 
 def test_fyi_only_teacher_email_uses_informational_footer(client, db_session, monkeypatch):
@@ -749,9 +751,12 @@ def test_auto_add_gate_demotes_optional_and_duplicate_schoolwide_events(client, 
     followup = db_session.scalar(select(FollowupContext).where(FollowupContext.household_id == 1))
     audit = db_session.scalar(select(DecisionAudit).where(DecisionAudit.request_id == response.json()["request_id"]))
 
-    assert sorted(event.title for event in events) == ["Good Friday", "March Break"]
+    # Auto-add disabled; all events go to followup_available regardless of category.
+    assert len(events) == 0
     assert followup is not None
     followup_titles = {str(item.get("title") or "") for item in list(followup.all_extracted_items or [])}
+    assert "March Break" in followup_titles
+    assert "Good Friday" in followup_titles
     assert "School Council meeting" in followup_titles
     assert "Grade 5 girls volleyball tournament" in followup_titles
     assert any("Spring Swap" in title for title in followup_titles)
@@ -759,7 +764,8 @@ def test_auto_add_gate_demotes_optional_and_duplicate_schoolwide_events(client, 
     outcomes = (audit.committed_actions or {}).get("event_outcomes") or []
     march_break = next(item for item in outcomes if item["title"] == "March Break")
     spring_swap = next(item for item in outcomes if "Spring Swap" in item["title"])
-    assert march_break["auto_add_decision"]["allow"] is True
+    assert march_break["auto_add_decision"]["allow"] is False
+    assert march_break["auto_add_decision"]["reason"] == "auto_add_disabled"
     assert spring_swap["auto_add_decision"]["allow"] is False
     assert next(item for item in outcomes if item["title"] == "School Council meeting")["execution_disposition"] == "followup_available"
 
@@ -1077,9 +1083,9 @@ def test_forwarded_fyi_preface_stays_ingestion(client, db_session, monkeypatch):
     assert response.status_code == 200
     assert response.json()["status"] == "ingestion_accepted"
 
+    # Auto-add disabled; event is held for explicit confirmation.
     event = db_session.scalar(select(Event).where(Event.household_id == 1))
-    assert event is not None
-    assert event.title == "Pizza Day"
+    assert event is None
 
 
 def test_forwarded_add_with_multiple_actionable_events_needs_clarification(client, db_session, monkeypatch):
@@ -1606,9 +1612,9 @@ def test_forwarded_footer_does_not_trigger_command_mode(client, db_session, monk
     assert response.status_code == 200
     assert response.json()["status"] == "ingestion_accepted"
 
+    # Auto-add disabled; event is held for explicit confirmation.
     event = db_session.scalar(select(Event).where(Event.household_id == 1))
-    assert event is not None
-    assert event.title == "Pizza Day"
+    assert event is None
 
 
 def test_chunk_failure_still_processes_other_chunks(client, db_session, monkeypatch):
@@ -1660,8 +1666,10 @@ def test_chunk_failure_still_processes_other_chunks(client, db_session, monkeypa
     assert response.json()["status"] == "ingestion_accepted"
 
     audit = db_session.scalar(select(DecisionAudit).where(DecisionAudit.household_id == 1).order_by(DecisionAudit.id.desc()))
+    # Auto-add disabled; event_created is 0 but followup_available is incremented for the extracted item.
     assert audit is not None
-    assert audit.policy_outcome["counts"]["event_created"] == 1
+    assert audit.policy_outcome["counts"]["event_created"] == 0
+    assert audit.policy_outcome["counts"]["followup_available"] >= 1
     assert audit.model_output["analysis"]["chunk_failures"][0]["detail"] == "ReadTimeout"
 
 
