@@ -39,7 +39,8 @@ def _event(title: str, *, reason: str = "", scope: str = "school_global", grades
     )
 
 
-def test_auto_add_allows_school_breaks_and_holidays():
+def test_auto_add_disabled_for_school_breaks():
+    # Auto-add is globally disabled; all items require explicit user confirmation.
     children = [_child(1, "Nolan", "Frankland", "1")]
     event = _event("March Break", reason="school break", preference=True)
     relevancy = compute_relevancy_evidence(
@@ -50,11 +51,11 @@ def test_auto_add_allows_school_breaks_and_holidays():
         positive_preference_topics=["School Closures"],
     )
     decision = evaluate_auto_add_candidate(event, relevancy, children)
-    assert decision.allow is True
-    assert decision.reason == "closure_or_break"
+    assert decision.allow is False
+    assert decision.reason == "auto_add_disabled"
 
 
-def test_auto_add_blocks_optional_schoolwide_and_volunteer_items():
+def test_auto_add_disabled_for_volunteer_items():
     children = [_child(1, "Nolan", "Frankland", "1")]
     event = _event(
         "Spring Swap volunteer setup shift",
@@ -71,10 +72,10 @@ def test_auto_add_blocks_optional_schoolwide_and_volunteer_items():
     )
     decision = evaluate_auto_add_candidate(event, relevancy, children)
     assert decision.allow is False
-    assert decision.reason == "optional_or_admin_event"
+    assert decision.reason == "auto_add_disabled"
 
 
-def test_auto_add_blocks_grade_mismatch():
+def test_auto_add_disabled_for_grade_mismatch():
     children = [_child(1, "Nolan", "Frankland", "1"), _child(2, "Jayden", "Frankland", "JK")]
     event = _event(
         "Grade 5 girls volleyball tournament",
@@ -92,10 +93,10 @@ def test_auto_add_blocks_grade_mismatch():
     )
     decision = evaluate_auto_add_candidate(event, relevancy, children)
     assert decision.allow is False
-    assert decision.reason == "grade_mismatch"
+    assert decision.reason == "auto_add_disabled"
 
 
-def test_auto_add_blocks_suppressed_preferences():
+def test_auto_add_disabled_for_suppressed_preferences():
     children = [_child(1, "Nolan", "Frankland", "1")]
     event = _event("Spirit Day", reason="theme day", scope="school_global")
     relevancy = compute_relevancy_evidence(
@@ -107,10 +108,10 @@ def test_auto_add_blocks_suppressed_preferences():
     )
     decision = evaluate_auto_add_candidate(event, relevancy, children, suppressed_match=True)
     assert decision.allow is False
-    assert decision.reason == "suppressed_preference"
+    assert decision.reason == "auto_add_disabled"
 
 
-def test_auto_add_allows_teacher_linked_preference_event_without_child_name():
+def test_auto_add_disabled_for_teacher_linked_preference_event():
     children = [
         _child(
             1,
@@ -134,5 +135,5 @@ def test_auto_add_allows_teacher_linked_preference_event_without_child_name():
 
     decision = evaluate_auto_add_candidate(event, relevancy, children)
     assert relevancy.teacher_match is True
-    assert decision.allow is True
-    assert decision.reason == "household_specific_preference_event"
+    assert decision.allow is False
+    assert decision.reason == "auto_add_disabled"
