@@ -19,7 +19,6 @@ class Household(Base):
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     spouse_phone: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     spouse_notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    auto_add_batch_a_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     daily_summary_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     weekly_digest_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -75,6 +74,26 @@ class Child(Base):
     grade: Mapped[str] = mapped_column(String(32), default="")
     status: Mapped[str] = mapped_column(String(32), default="active")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    teacher_contacts: Mapped[list["TeacherContact"]] = relationship(
+        "TeacherContact",
+        back_populates="child",
+        cascade="all, delete-orphan",
+        order_by="TeacherContact.id",
+    )
+
+
+class TeacherContact(Base):
+    __tablename__ = "teacher_contacts"
+    __table_args__ = (UniqueConstraint("child_id", "teacher_email", name="uq_teacher_contact_child_email"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("children.id"), index=True)
+    teacher_name: Mapped[str] = mapped_column(String(255), default="")
+    teacher_email: Mapped[str] = mapped_column(String(255), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    child = relationship("Child", back_populates="teacher_contacts")
 
 
 class PreferenceProfile(Base):
@@ -101,7 +120,6 @@ class PreferenceRule(Base):
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     category: Mapped[str] = mapped_column(String(128), default="general")
-    bucket: Mapped[str] = mapped_column(String(1), default="B")
     behavior: Mapped[str] = mapped_column(String(32), default="mention")
 
 
@@ -118,6 +136,10 @@ class SourceMessage(Base):
     household_id: Mapped[int] = mapped_column(ForeignKey("households.id"), index=True)
     subject: Mapped[str] = mapped_column(String(255), default="")
     body_text: Mapped[str] = mapped_column(Text, default="")
+    internet_message_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True, index=True)
+    in_reply_to_message_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    references_header: Mapped[str] = mapped_column(Text, default="")
+    thread_key: Mapped[str] = mapped_column(String(512), default="", index=True)
 
 
 class WebhookReceipt(Base):
@@ -166,21 +188,6 @@ class Event(Base):
     calendar_event_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
-
-
-class PendingEvent(Base):
-    __tablename__ = "pending_events"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    household_id: Mapped[int] = mapped_column(ForeignKey("households.id"), index=True)
-    status: Mapped[str] = mapped_column(String(32), default="pending")
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: utcnow() + timedelta(days=7))
-    event_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    origin_channel: Mapped[str] = mapped_column(String(32), default="email")
-    origin_thread_id: Mapped[str] = mapped_column(String(255), default="")
-    version: Mapped[int] = mapped_column(Integer, default=1)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
-    title: Mapped[str] = mapped_column(String(255), default="")
 
 
 class Reminder(Base):
@@ -298,4 +305,46 @@ class FollowupContext(Base):
     all_extracted_items: Mapped[list] = mapped_column(JSON, default=list)
     section_snippets: Mapped[list] = mapped_column(JSON, default=list)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: utcnow() + timedelta(days=7))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SmsConversationState(Base):
+    __tablename__ = "sms_conversation_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    household_id: Mapped[int] = mapped_column(ForeignKey("households.id"), index=True)
+    channel: Mapped[str] = mapped_column(String(32), default="sms")
+    state_type: Mapped[str] = mapped_column(String(64), default="followup_selection")
+    requested_action: Mapped[str] = mapped_column(String(32), default="add")
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    candidate_items: Mapped[list] = mapped_column(JSON, default=list)
+    source_followup_context_ids: Mapped[list] = mapped_column(JSON, default=list)
+    prompt_message: Mapped[str] = mapped_column(Text, default="")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: utcnow() + timedelta(days=1))
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ThreadDocument(Base):
+    __tablename__ = "thread_documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    household_id: Mapped[int] = mapped_column(ForeignKey("households.id"), index=True)
+    source_message_id: Mapped[int] = mapped_column(ForeignKey("source_messages.id"), index=True)
+    thread_key: Mapped[str] = mapped_column(String(512), index=True)
+    filename: Mapped[str] = mapped_column(String(255), default="")
+    content_type: Mapped[str] = mapped_column(String(255), default="")
+    source_url: Mapped[str] = mapped_column(Text, default="")
+    extracted_text: Mapped[str] = mapped_column(Text, default="")
+    openai_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AgentSessionItem(Base):
+    __tablename__ = "agent_session_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(255), index=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

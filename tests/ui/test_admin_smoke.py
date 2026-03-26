@@ -17,6 +17,13 @@ def test_inbound_activity_page_renders(client):
     assert "Inbound Activity" in response.text
 
 
+def test_agentsdk_architecture_page_renders(client):
+    response = client.get("/architecture-diagrams-agentsdk")
+    assert response.status_code == 200
+    assert "How LovelyChaos uses the Agent SDK" in response.text
+    assert "A school message comes in" in response.text
+
+
 def test_admin_settings_and_children_flow(client):
     update = client.put(
         "/admin/settings",
@@ -27,12 +34,26 @@ def test_admin_settings_and_children_flow(client):
     )
     assert update.status_code == 200
 
-    child = client.post("/admin/children", json={"name": "Ava", "school_name": "PS 101", "grade": "2"})
+    child = client.post(
+        "/admin/children",
+        json={
+            "name": "Ava",
+            "school_name": "PS 101",
+            "grade": "2",
+            "teacher_contacts": [
+                {
+                    "teacher_name": "Helen Poulos",
+                    "teacher_email": "helen.poulos@tdsb.on.ca",
+                }
+            ],
+        },
+    )
     assert child.status_code == 200
+    assert child.json()["teacher_contacts"][0]["teacher_email"] == "helen.poulos@tdsb.on.ca"
 
     children = client.get("/admin/children")
     assert children.status_code == 200
-    assert any(c["name"] == "Ava" for c in children.json())
+    assert any(c["name"] == "Ava" and c["teacher_contacts"] for c in children.json())
 
 
 def test_school_search_endpoint(client, monkeypatch):
@@ -99,11 +120,8 @@ def test_onboarding_profile_flow(client):
         "/onboarding/profile/form",
         data={
             "admin_email": "newadmin@example.com",
-            "secondary_admin_email": "secondparent@example.com",
             "admin_phone": "+15558889999",
             "timezone_value": "America/Toronto",
-            "spouse_phone": "+15557770000",
-            "spouse_notifications_enabled": "on",
         },
     )
     assert save.status_code == 200
@@ -112,5 +130,4 @@ def test_onboarding_profile_flow(client):
     assert profile.status_code == 200
     body = profile.json()
     assert body["admin_email"] == "newadmin@example.com"
-    assert body["secondary_admin_email"] == "secondparent@example.com"
     assert body["timezone"] == "America/Toronto"

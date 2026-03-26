@@ -78,7 +78,11 @@ def evaluate_auto_add_candidate(
     event: ExtractedEvent,
     relevancy: RelevancyEvidence,
     children: list[Child],
+    suppressed_match: bool = False,
 ) -> AutoAddDecision:
+    # Auto-add disabled; all items require explicit user confirmation
+    return AutoAddDecision(False, "auto_add_disabled")
+
     if not event.start_at or not event.end_at:
         return AutoAddDecision(False, "missing_schedule_window")
 
@@ -95,10 +99,12 @@ def evaluate_auto_add_candidate(
 
     if _has_grade_mismatch(normalized, event, children, relevancy):
         return AutoAddDecision(False, "grade_mismatch")
-    if event.target_scope == "child_specific" and not relevancy.name_match and not relevancy.grade_match:
+    if event.target_scope == "child_specific" and not (relevancy.name_match or relevancy.grade_match or relevancy.teacher_match):
         return AutoAddDecision(False, "child_scope_mismatch")
-    if event.target_scope == "grade_specific" and not relevancy.grade_match:
+    if event.target_scope == "grade_specific" and not (relevancy.grade_match or relevancy.teacher_match):
         return AutoAddDecision(False, "grade_scope_mismatch")
+    if suppressed_match:
+        return AutoAddDecision(False, "suppressed_preference")
 
     if any(term in normalized for term in AUTO_ADD_CLOSURE_TERMS):
         return AutoAddDecision(True, "closure_or_break")
@@ -106,7 +112,7 @@ def evaluate_auto_add_candidate(
     if any(term in normalized for term in AUTO_ADD_BLOCKED_TERMS):
         return AutoAddDecision(False, "optional_or_admin_event")
 
-    if (relevancy.name_match or relevancy.grade_match) and any(term in normalized for term in AUTO_ADD_PREFERENCE_TERMS):
+    if (relevancy.name_match or relevancy.grade_match or relevancy.teacher_match) and any(term in normalized for term in AUTO_ADD_PREFERENCE_TERMS):
         return AutoAddDecision(True, "household_specific_preference_event")
 
     if relevancy.preference_match and any(term in normalized for term in AUTO_ADD_PREFERENCE_TERMS):

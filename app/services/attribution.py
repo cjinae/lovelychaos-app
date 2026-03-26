@@ -13,6 +13,19 @@ class AttributionResult:
         self.user = user
 
 
+def _is_primary_admin(db: Session, user: User) -> bool:
+    primary_admin = db.scalar(
+        select(User)
+        .where(
+            User.household_id == user.household_id,
+            User.is_admin.is_(True),
+            User.verified.is_(True),
+        )
+        .order_by(User.id.asc())
+    )
+    return primary_admin is not None and primary_admin.id == user.id
+
+
 def resolve_admin_sender(db: Session, sender: str) -> AttributionResult:
     normalized = sender.strip().lower()
     users = db.scalars(
@@ -22,6 +35,8 @@ def resolve_admin_sender(db: Session, sender: str) -> AttributionResult:
         return AttributionResult("unverified")
     if len(users) > 1:
         return AttributionResult("ambiguous")
+    if not _is_primary_admin(db, users[0]):
+        return AttributionResult("unverified")
     return AttributionResult("ok", users[0])
 
 
@@ -34,4 +49,6 @@ def resolve_admin_phone(db: Session, sender_phone: str) -> AttributionResult:
         return AttributionResult("unverified")
     if len(users) > 1:
         return AttributionResult("ambiguous")
+    if not _is_primary_admin(db, users[0]):
+        return AttributionResult("unverified")
     return AttributionResult("ok", users[0])

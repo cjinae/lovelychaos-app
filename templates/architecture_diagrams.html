@@ -1,0 +1,743 @@
+{% extends "base.html" %}
+
+{% block title %}LovelyChaos Architecture Diagrams{% endblock %}
+
+{% block extra_head %}
+  <style>
+    :root {
+      --arch-paper: rgba(255, 252, 247, 0.88);
+      --arch-paper-strong: rgba(255, 249, 241, 0.96);
+      --arch-ink-soft: rgba(55, 42, 36, 0.7);
+      --arch-line: rgba(107, 80, 67, 0.16);
+      --arch-lane: rgba(255, 246, 238, 0.68);
+      --arch-lane-strong: rgba(250, 235, 226, 0.86);
+      --arch-deterministic: #f26f55;
+      --arch-llm: #2d7d73;
+      --arch-storage: #8c6c55;
+      --arch-external: #d5a34f;
+      --arch-arrow: rgba(89, 62, 50, 0.42);
+    }
+
+    .lc-hero--diagram {
+      align-items: end;
+      background:
+        radial-gradient(circle at top right, rgba(242, 111, 85, 0.16), transparent 38%),
+        linear-gradient(135deg, rgba(255, 251, 245, 0.96), rgba(255, 245, 236, 0.88));
+      border: 1px solid rgba(107, 80, 67, 0.12);
+      box-shadow: 0 28px 80px rgba(82, 54, 43, 0.08);
+    }
+
+    .arch-meta {
+      display: grid;
+      gap: 14px;
+    }
+
+    .arch-kicker {
+      color: var(--arch-ink-soft);
+      font-size: 0.96rem;
+      line-height: 1.7;
+      max-width: 64ch;
+    }
+
+    .arch-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .arch-chip {
+      align-items: center;
+      background: rgba(255, 250, 244, 0.92);
+      border: 1px solid rgba(107, 80, 67, 0.14);
+      border-radius: 999px;
+      color: var(--lc-ink);
+      display: inline-flex;
+      font-size: 0.82rem;
+      gap: 8px;
+      letter-spacing: 0.04em;
+      padding: 8px 12px;
+      text-transform: uppercase;
+    }
+
+    .arch-chip__dot {
+      border-radius: 999px;
+      height: 10px;
+      width: 10px;
+    }
+
+    .arch-section {
+      display: grid;
+      gap: 18px;
+      margin-top: 32px;
+    }
+
+    .arch-card {
+      background: var(--arch-paper);
+      border: 1px solid var(--arch-line);
+      border-radius: 32px;
+      box-shadow: 0 24px 60px rgba(81, 58, 46, 0.08);
+      overflow: hidden;
+      padding: 22px;
+    }
+
+    .arch-card__head {
+      align-items: end;
+      display: flex;
+      gap: 18px;
+      justify-content: space-between;
+      margin-bottom: 18px;
+    }
+
+    .arch-card__copy {
+      color: var(--arch-ink-soft);
+      margin: 8px 0 0;
+      max-width: 72ch;
+    }
+
+    .arch-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .arch-badge {
+      background: rgba(255, 247, 239, 0.94);
+      border: 1px solid rgba(107, 80, 67, 0.14);
+      border-radius: 999px;
+      color: var(--arch-ink-soft);
+      font-size: 0.74rem;
+      letter-spacing: 0.04em;
+      padding: 7px 10px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .arch-scroll {
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .arch-scroll::-webkit-scrollbar {
+      height: 10px;
+    }
+
+    .arch-scroll::-webkit-scrollbar-thumb {
+      background: rgba(140, 108, 85, 0.24);
+      border-radius: 999px;
+    }
+
+    .arch-map {
+      min-width: 1420px;
+      width: 100%;
+    }
+
+    .arch-map svg {
+      display: block;
+      height: auto;
+      width: 100%;
+    }
+
+    .arch-lane-label {
+      fill: var(--lc-ink);
+      font-family: "DM Sans", sans-serif;
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    .arch-lane-sub {
+      fill: var(--arch-ink-soft);
+      font-family: "DM Sans", sans-serif;
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .arch-node-title {
+      fill: var(--lc-ink);
+      font-family: "DM Sans", sans-serif;
+      font-size: 17px;
+      font-weight: 600;
+    }
+
+    .arch-node-copy {
+      fill: var(--arch-ink-soft);
+      font-family: "DM Sans", sans-serif;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .arch-node-tag {
+      fill: var(--lc-ink);
+      font-family: "DM Sans", sans-serif;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+
+    .arch-notes {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-top: 10px;
+    }
+
+    .arch-note {
+      background: rgba(255, 250, 246, 0.9);
+      border: 1px solid rgba(107, 80, 67, 0.12);
+      border-radius: 22px;
+      padding: 18px 18px 16px;
+    }
+
+    .arch-note h3 {
+      font-family: "Playfair Display", serif;
+      font-size: 1.2rem;
+      margin: 0 0 8px;
+    }
+
+    .arch-note p {
+      color: var(--arch-ink-soft);
+      margin: 0;
+    }
+
+    @media (max-width: 920px) {
+      .arch-card {
+        border-radius: 26px;
+        padding: 16px;
+      }
+
+      .arch-card__head {
+        align-items: start;
+        flex-direction: column;
+      }
+
+      .arch-badges {
+        justify-content: flex-start;
+      }
+
+      .arch-notes {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+{% endblock %}
+
+{% block hero %}
+  <section class="lc-hero lc-hero--diagram">
+    <div class="lc-hero__copy arch-meta">
+      <p class="lc-eyebrow">System View</p>
+      <h1 class="lc-display">How LovelyChaos combines deterministic logic and LLM decisions.</h1>
+      <p class="arch-kicker">
+        These diagrams map the current code paths in <code>/webhooks/email/inbound</code>, <code>/webhooks/sms/inbound</code>,
+        the content-analysis pipeline, the summary pipeline, and the follow-up command handlers. Deterministic gates handle trust,
+        tenant safety, policy, storage, and side effects. LLM calls handle extraction, summarization, and intent parsing.
+      </p>
+      <div class="arch-legend" aria-label="Diagram legend">
+        <span class="arch-chip"><span class="arch-chip__dot" style="background: var(--arch-deterministic);"></span>Deterministic</span>
+        <span class="arch-chip"><span class="arch-chip__dot" style="background: var(--arch-llm);"></span>LLM</span>
+        <span class="arch-chip"><span class="arch-chip__dot" style="background: var(--arch-storage);"></span>Storage / Context</span>
+        <span class="arch-chip"><span class="arch-chip__dot" style="background: var(--arch-external);"></span>External Provider</span>
+      </div>
+    </div>
+    <div class="lc-hero__aside">
+      <a class="lc-button" href="/admin/activity">Open activity view</a>
+      <a class="lc-button lc-button--secondary" href="/design-language">Open design language</a>
+    </div>
+  </section>
+{% endblock %}
+
+{% block page %}
+  <section class="arch-section" aria-label="Architecture diagrams">
+    <article class="arch-card">
+      <div class="arch-card__head">
+        <div>
+          <p class="lc-eyebrow">Diagram 1</p>
+          <h2 class="lc-section-title">Email ingestion: newsletter in, structured summary and actions out</h2>
+          <p class="arch-card__copy">
+            The app starts with strict deterministic trust checks, then uses the LLM for event extraction and summary synthesis,
+            and finally returns to deterministic policy logic for validation, routing, calendar writes, notifications, and audit.
+          </p>
+        </div>
+        <div class="arch-badges">
+          <span class="arch-badge">`/webhooks/email/inbound`</span>
+          <span class="arch-badge">`resolve_and_download_links`</span>
+          <span class="arch-badge">`build_brief_summary`</span>
+        </div>
+      </div>
+      <div class="arch-scroll">
+        <div class="arch-map">
+          <svg viewBox="0 0 1460 1020" role="img" aria-labelledby="ingest-title ingest-desc">
+            <title id="ingest-title">LovelyChaos email ingestion architecture</title>
+            <desc id="ingest-desc">Five-lane diagram showing inputs, deterministic preparation, LLM extraction and summarization, deterministic routing and policy, and outputs.</desc>
+
+            <defs>
+              <marker id="arch-arrowhead" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+                <path d="M0,0 L10,5 L0,10 z" fill="var(--arch-arrow)"></path>
+              </marker>
+              <filter id="arch-shadow" x="-20%" y="-20%" width="140%" height="140%">
+                <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="rgba(81,58,46,0.12)"></feDropShadow>
+              </filter>
+            </defs>
+
+            <rect x="0" y="0" width="1460" height="1020" rx="30" fill="rgba(255,251,246,0.86)"></rect>
+
+            <g>
+              <rect x="28" y="28" width="250" height="964" rx="28" fill="var(--arch-lane)"></rect>
+              <rect x="308" y="28" width="250" height="964" rx="28" fill="var(--arch-lane-strong)"></rect>
+              <rect x="588" y="28" width="250" height="964" rx="28" fill="rgba(232, 245, 242, 0.95)"></rect>
+              <rect x="868" y="28" width="250" height="964" rx="28" fill="var(--arch-lane-strong)"></rect>
+              <rect x="1148" y="28" width="284" height="964" rx="28" fill="rgba(255, 248, 236, 0.92)"></rect>
+            </g>
+
+            <g>
+              <text x="54" y="72" class="arch-lane-sub">Lane 1</text>
+              <text x="54" y="102" class="arch-lane-label">Email Sources</text>
+              <text x="334" y="72" class="arch-lane-sub">Lane 2</text>
+              <text x="334" y="102" class="arch-lane-label">Deterministic Prep</text>
+              <text x="614" y="72" class="arch-lane-sub">Lane 3</text>
+              <text x="614" y="102" class="arch-lane-label">LLM Decisions</text>
+              <text x="894" y="72" class="arch-lane-sub">Lane 4</text>
+              <text x="894" y="102" class="arch-lane-label">Policy + Routing</text>
+              <text x="1174" y="72" class="arch-lane-sub">Lane 5</text>
+              <text x="1174" y="102" class="arch-lane-label">Outputs + Memory</text>
+            </g>
+
+            <g filter="url(#arch-shadow)">
+              <g>
+                <rect x="50" y="146" width="206" height="130" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(213,163,79,0.44)"></rect>
+                <rect x="68" y="164" width="88" height="22" rx="11" fill="rgba(213,163,79,0.18)"></rect>
+                <text x="82" y="179" class="arch-node-tag">External</text>
+                <text x="68" y="208" class="arch-node-title">Inbound email</text>
+                <text x="68" y="232" class="arch-node-copy">Direct school email</text>
+                <text x="68" y="252" class="arch-node-copy">Forwarded school email</text>
+                <text x="68" y="272" class="arch-node-copy">SchoolMessenger links and PDFs</text>
+              </g>
+
+              <g>
+                <rect x="50" y="340" width="206" height="126" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(213,163,79,0.44)"></rect>
+                <rect x="68" y="358" width="96" height="22" rx="11" fill="rgba(213,163,79,0.18)"></rect>
+                <text x="82" y="373" class="arch-node-tag">Providers</text>
+                <text x="68" y="402" class="arch-node-title">Webhook entrypoints</text>
+                <text x="68" y="426" class="arch-node-copy">Resend inbound webhook</text>
+                <text x="68" y="446" class="arch-node-copy">Direct local inbound endpoint</text>
+              </g>
+
+              <g>
+                <rect x="330" y="132" width="206" height="150" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="348" y="150" width="120" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="362" y="165" class="arch-node-tag">Deterministic</text>
+                <text x="348" y="194" class="arch-node-title">Trust + tenant gate</text>
+                <text x="348" y="218" class="arch-node-copy">Verify webhook secret</text>
+                <text x="348" y="238" class="arch-node-copy">Deduplicate provider event</text>
+                <text x="348" y="258" class="arch-node-copy">Resolve verified admin sender</text>
+              </g>
+
+              <g>
+                <rect x="330" y="320" width="206" height="164" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="348" y="338" width="120" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="362" y="353" class="arch-node-tag">Deterministic</text>
+                <text x="348" y="382" class="arch-node-title">Intent split + normalization</text>
+                <text x="348" y="406" class="arch-node-copy">Persist `SourceMessage` + receipt</text>
+                <text x="348" y="426" class="arch-node-copy">Classify plain email vs forwarded preface</text>
+                <text x="348" y="446" class="arch-node-copy">If command candidate, branch to reply flow</text>
+                <text x="348" y="466" class="arch-node-copy">Else continue as ingestion</text>
+              </g>
+
+              <g>
+                <rect x="330" y="522" width="206" height="222" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="348" y="540" width="120" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="362" y="555" class="arch-node-tag">Deterministic</text>
+                <text x="348" y="584" class="arch-node-title">Content preparation</text>
+                <text x="348" y="608" class="arch-node-copy">Extract links from email body</text>
+                <text x="348" y="628" class="arch-node-copy">Resolve SchoolMessenger redirects</text>
+                <text x="348" y="648" class="arch-node-copy">Download PDFs, parse text, OCR fallback</text>
+                <text x="348" y="668" class="arch-node-copy">Clean forwarding boilerplate and noise</text>
+                <text x="348" y="688" class="arch-node-copy">Score sections and build prioritized chunks</text>
+                <text x="348" y="708" class="arch-node-copy">Load children + household priorities</text>
+              </g>
+
+              <g>
+                <rect x="610" y="162" width="206" height="164" rx="24" fill="rgba(237, 248, 245, 0.96)" stroke="rgba(45,125,115,0.34)"></rect>
+                <rect x="628" y="180" width="76" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="648" y="195" class="arch-node-tag">LLM</text>
+                <text x="628" y="224" class="arch-node-title">Chunked event extraction</text>
+                <text x="628" y="248" class="arch-node-copy">`extract_events()` per prioritized chunk</text>
+                <text x="628" y="268" class="arch-node-copy">Strict JSON event schema</text>
+                <text x="628" y="288" class="arch-node-copy">Deduplicate candidates across chunks</text>
+                <text x="628" y="308" class="arch-node-copy">Record chunk failures, notes, confidence</text>
+              </g>
+
+              <g>
+                <rect x="610" y="374" width="206" height="176" rx="24" fill="rgba(237, 248, 245, 0.96)" stroke="rgba(45,125,115,0.34)"></rect>
+                <rect x="628" y="392" width="76" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="648" y="407" class="arch-node-tag">LLM</text>
+                <text x="628" y="436" class="arch-node-title">Household summary synthesis</text>
+                <text x="628" y="460" class="arch-node-copy">`extract_summary_candidates()`</text>
+                <text x="628" y="480" class="arch-node-copy">Consolidate dated items, system defaults,</text>
+                <text x="628" y="500" class="arch-node-copy">user priorities, school knowledge context</text>
+                <text x="628" y="520" class="arch-node-copy">and kept section snippets</text>
+              </g>
+
+              <g>
+                <rect x="610" y="598" width="206" height="152" rx="24" fill="rgba(237, 248, 245, 0.96)" stroke="rgba(45,125,115,0.34)"></rect>
+                <rect x="628" y="616" width="76" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="648" y="631" class="arch-node-tag">LLM</text>
+                <text x="628" y="660" class="arch-node-title">Brevity compression</text>
+                <text x="628" y="684" class="arch-node-copy">`compress_summary()` turns candidates into</text>
+                <text x="628" y="704" class="arch-node-copy">Important Dates, Important Items,</text>
+                <text x="628" y="724" class="arch-node-copy">Other Topics, and a brief recap message</text>
+              </g>
+
+              <g>
+                <rect x="890" y="132" width="206" height="176" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="908" y="150" width="120" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="922" y="165" class="arch-node-tag">Deterministic</text>
+                <text x="908" y="194" class="arch-node-title">Policy evaluation</text>
+                <text x="908" y="218" class="arch-node-copy">`validate_candidate()`</text>
+                <text x="908" y="238" class="arch-node-copy">`compute_relevancy_evidence()`</text>
+                <text x="908" y="258" class="arch-node-copy">Suppressed topic matching</text>
+                <text x="908" y="278" class="arch-node-copy">`evaluate_auto_add_candidate()`</text>
+              </g>
+
+              <g>
+                <rect x="890" y="344" width="206" height="184" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="908" y="362" width="120" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="922" y="377" class="arch-node-tag">Deterministic</text>
+                <text x="908" y="406" class="arch-node-title">Execution routing</text>
+                <text x="908" y="430" class="arch-node-copy">Idempotency keys block duplicates</text>
+                <text x="908" y="450" class="arch-node-copy">Create calendar event when valid + allowed</text>
+                <text x="908" y="470" class="arch-node-copy">Store informational items for school-global</text>
+                <text x="908" y="490" class="arch-node-copy">Leave actionable items available for follow-up</text>
+                <text x="908" y="510" class="arch-node-copy">Fallback recap if extraction is empty</text>
+              </g>
+
+              <g>
+                <rect x="890" y="564" width="206" height="182" rx="24" fill="rgba(247, 241, 236, 0.96)" stroke="rgba(140,108,85,0.3)"></rect>
+                <rect x="908" y="582" width="88" height="22" rx="11" fill="rgba(140,108,85,0.12)"></rect>
+                <text x="928" y="597" class="arch-node-tag">Storage</text>
+                <text x="908" y="626" class="arch-node-title">Audit + memory write</text>
+                <text x="908" y="650" class="arch-node-copy">Persist `DecisionAudit`</text>
+                <text x="908" y="670" class="arch-node-copy">Persist `FollowupContext` with summary items</text>
+                <text x="908" y="690" class="arch-node-copy">Attach kept section snippets for `more_info`</text>
+                <text x="908" y="710" class="arch-node-copy">Store events and informational items</text>
+              </g>
+
+              <g>
+                <rect x="1170" y="146" width="240" height="154" rx="24" fill="rgba(255, 252, 244, 0.98)" stroke="rgba(213,163,79,0.44)"></rect>
+                <rect x="1188" y="164" width="96" height="22" rx="11" fill="rgba(213,163,79,0.18)"></rect>
+                <text x="1202" y="179" class="arch-node-tag">External</text>
+                <text x="1188" y="208" class="arch-node-title">Calendar + notifications</text>
+                <text x="1188" y="232" class="arch-node-copy">Google Calendar provider</text>
+                <text x="1188" y="252" class="arch-node-copy">Resend / Twilio outbound delivery</text>
+                <text x="1188" y="272" class="arch-node-copy">Event-created notification fan-out</text>
+              </g>
+
+              <g>
+                <rect x="1170" y="342" width="240" height="164" rx="24" fill="rgba(247, 241, 236, 0.96)" stroke="rgba(140,108,85,0.3)"></rect>
+                <rect x="1188" y="360" width="88" height="22" rx="11" fill="rgba(140,108,85,0.12)"></rect>
+                <text x="1208" y="375" class="arch-node-tag">Storage</text>
+                <text x="1188" y="404" class="arch-node-title">Persisted state</text>
+                <text x="1188" y="428" class="arch-node-copy">`WebhookReceipt`, `SourceMessage`</text>
+                <text x="1188" y="448" class="arch-node-copy">`Event`, `InformationalItem`</text>
+                <text x="1188" y="468" class="arch-node-copy">`DecisionAudit`, `IdempotencyKey`</text>
+                <text x="1188" y="488" class="arch-node-copy">`FollowupContext`</text>
+              </g>
+
+              <g>
+                <rect x="1170" y="548" width="240" height="182" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="1188" y="566" width="120" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="1202" y="581" class="arch-node-tag">User-facing</text>
+                <text x="1188" y="610" class="arch-node-title">Parent/admin output</text>
+                <text x="1188" y="634" class="arch-node-copy">Short recap email or SMS</text>
+                <text x="1188" y="654" class="arch-node-copy">Calendar additions when auto-add applies</text>
+                <text x="1188" y="674" class="arch-node-copy">Next-step follow-up context kept for reply</text>
+                <text x="1188" y="694" class="arch-node-copy">No internal batch language exposed</text>
+              </g>
+            </g>
+
+            <g stroke="var(--arch-arrow)" stroke-width="3" fill="none" marker-end="url(#arch-arrowhead)">
+              <path d="M256 212 C290 212 294 212 330 212"></path>
+              <path d="M256 404 C290 404 294 404 330 404"></path>
+              <path d="M433 282 L433 320"></path>
+              <path d="M433 484 L433 522"></path>
+              <path d="M536 210 C566 210 576 210 610 210"></path>
+              <path d="M536 632 C566 632 576 632 610 632"></path>
+              <path d="M713 326 L713 374"></path>
+              <path d="M713 550 L713 598"></path>
+              <path d="M816 224 C850 224 860 224 890 224"></path>
+              <path d="M816 674 C850 674 860 674 890 674"></path>
+              <path d="M993 308 L993 344"></path>
+              <path d="M993 528 L993 564"></path>
+              <path d="M1096 436 C1132 436 1140 436 1170 436"></path>
+              <path d="M1096 218 C1132 218 1140 218 1170 218"></path>
+              <path d="M1096 650 C1132 650 1140 650 1170 650"></path>
+            </g>
+
+            <g stroke="var(--arch-arrow)" stroke-width="2.5" fill="none" stroke-dasharray="8 8" marker-end="url(#arch-arrowhead)">
+              <path d="M500 406 C612 406 670 792 1186 792"></path>
+            </g>
+
+            <text x="694" y="796" class="arch-node-copy">Command-style emails branch into Diagram 2 instead of the ingestion summary path.</text>
+          </svg>
+        </div>
+      </div>
+    </article>
+
+    <article class="arch-card">
+      <div class="arch-card__head">
+        <div>
+          <p class="lc-eyebrow">Diagram 2</p>
+          <h2 class="lc-section-title">Reply handling: email and SMS follow-up commands</h2>
+          <p class="arch-card__copy">
+            Replies are lighter on model work. The LLM mainly classifies intent and sometimes re-extracts an event from forwarded content.
+            Deterministic logic owns disambiguation, follow-up context lookup, tenant safety, calendar mutations, reminders, preference writes, and response delivery.
+          </p>
+        </div>
+        <div class="arch-badges">
+          <span class="arch-badge">`/webhooks/sms/inbound`</span>
+          <span class="arch-badge">`parse_command()`</span>
+          <span class="arch-badge">`_handle_add_command()`</span>
+        </div>
+      </div>
+      <div class="arch-scroll">
+        <div class="arch-map">
+          <svg viewBox="0 0 1460 1070" role="img" aria-labelledby="reply-title reply-desc">
+            <title id="reply-title">LovelyChaos email and SMS reply architecture</title>
+            <desc id="reply-desc">Five-lane diagram showing inbound reply channels, deterministic context loading, LLM command parsing, deterministic command execution, and outbound replies plus state updates.</desc>
+
+            <defs>
+              <marker id="arch-arrowhead-2" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+                <path d="M0,0 L10,5 L0,10 z" fill="var(--arch-arrow)"></path>
+              </marker>
+            </defs>
+
+            <rect x="0" y="0" width="1460" height="1070" rx="30" fill="rgba(255,251,246,0.86)"></rect>
+
+            <g>
+              <rect x="28" y="28" width="250" height="1014" rx="28" fill="var(--arch-lane)"></rect>
+              <rect x="308" y="28" width="250" height="1014" rx="28" fill="var(--arch-lane-strong)"></rect>
+              <rect x="588" y="28" width="250" height="1014" rx="28" fill="rgba(232, 245, 242, 0.95)"></rect>
+              <rect x="868" y="28" width="250" height="1014" rx="28" fill="var(--arch-lane-strong)"></rect>
+              <rect x="1148" y="28" width="284" height="1014" rx="28" fill="rgba(255, 248, 236, 0.92)"></rect>
+            </g>
+
+            <g>
+              <text x="54" y="72" class="arch-lane-sub">Lane 1</text>
+              <text x="54" y="102" class="arch-lane-label">Reply Channels</text>
+              <text x="334" y="72" class="arch-lane-sub">Lane 2</text>
+              <text x="334" y="102" class="arch-lane-label">Context + Guards</text>
+              <text x="614" y="72" class="arch-lane-sub">Lane 3</text>
+              <text x="614" y="102" class="arch-lane-label">LLM Parsing</text>
+              <text x="894" y="72" class="arch-lane-sub">Lane 4</text>
+              <text x="894" y="102" class="arch-lane-label">Command Execution</text>
+              <text x="1174" y="72" class="arch-lane-sub">Lane 5</text>
+              <text x="1174" y="102" class="arch-lane-label">Responses + State</text>
+            </g>
+
+            <g filter="url(#arch-shadow)">
+              <g>
+                <rect x="50" y="140" width="206" height="140" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(213,163,79,0.44)"></rect>
+                <rect x="68" y="158" width="96" height="22" rx="11" fill="rgba(213,163,79,0.18)"></rect>
+                <text x="82" y="173" class="arch-node-tag">External</text>
+                <text x="68" y="202" class="arch-node-title">Email follow-up</text>
+                <text x="68" y="226" class="arch-node-copy">Reply email from verified parent</text>
+                <text x="68" y="246" class="arch-node-copy">Or short note above a forwarded email</text>
+                <text x="68" y="266" class="arch-node-copy">Handled on `/webhooks/email/inbound`</text>
+              </g>
+
+              <g>
+                <rect x="50" y="324" width="206" height="140" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(213,163,79,0.44)"></rect>
+                <rect x="68" y="342" width="96" height="22" rx="11" fill="rgba(213,163,79,0.18)"></rect>
+                <text x="82" y="357" class="arch-node-tag">External</text>
+                <text x="68" y="386" class="arch-node-title">SMS follow-up</text>
+                <text x="68" y="410" class="arch-node-copy">Twilio SMS or direct SMS webhook</text>
+                <text x="68" y="430" class="arch-node-copy">Short, ambiguous replies are common here</text>
+                <text x="68" y="450" class="arch-node-copy">Numeric disambiguation is supported</text>
+              </g>
+
+              <g>
+                <rect x="330" y="126" width="206" height="170" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="348" y="144" width="120" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="362" y="159" class="arch-node-tag">Deterministic</text>
+                <text x="348" y="188" class="arch-node-title">Trust, dedupe, attribution</text>
+                <text x="348" y="212" class="arch-node-copy">Verify webhook / Twilio signature</text>
+                <text x="348" y="232" class="arch-node-copy">Deduplicate provider event</text>
+                <text x="348" y="252" class="arch-node-copy">Resolve verified admin sender or phone</text>
+                <text x="348" y="272" class="arch-node-copy">Persist source message</text>
+              </g>
+
+              <g>
+                <rect x="330" y="330" width="206" height="194" rx="24" fill="rgba(247, 241, 236, 0.96)" stroke="rgba(140,108,85,0.3)"></rect>
+                <rect x="348" y="348" width="88" height="22" rx="11" fill="rgba(140,108,85,0.12)"></rect>
+                <text x="368" y="363" class="arch-node-tag">Context</text>
+                <text x="348" y="392" class="arch-node-title">Load memory for replies</text>
+                <text x="348" y="416" class="arch-node-copy">Active `FollowupContext` from the last recap</text>
+                <text x="348" y="436" class="arch-node-copy">Recent follow-up contexts for SMS matching</text>
+                <text x="348" y="456" class="arch-node-copy">Active `SmsConversationState` for numbered choices</text>
+                <text x="348" y="476" class="arch-node-copy">Current calendar binding and Google credentials</text>
+                <text x="348" y="496" class="arch-node-copy">Idempotency keys and existing events</text>
+              </g>
+
+              <g>
+                <rect x="330" y="558" width="206" height="180" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="348" y="576" width="120" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="362" y="591" class="arch-node-tag">Deterministic</text>
+                <text x="348" y="620" class="arch-node-title">Heuristics before execution</text>
+                <text x="348" y="644" class="arch-node-copy">Email preface boundary detection</text>
+                <text x="348" y="664" class="arch-node-copy">`_looks_like_calendar_add_request()`</text>
+                <text x="348" y="684" class="arch-node-copy">Direct month-day parser for simple add requests</text>
+                <text x="348" y="704" class="arch-node-copy">Clarification builder for multiple matches</text>
+              </g>
+
+              <g>
+                <rect x="610" y="152" width="206" height="160" rx="24" fill="rgba(237, 248, 245, 0.96)" stroke="rgba(45,125,115,0.34)"></rect>
+                <rect x="628" y="170" width="76" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="648" y="185" class="arch-node-tag">LLM</text>
+                <text x="628" y="214" class="arch-node-title">Intent parse</text>
+                <text x="628" y="238" class="arch-node-copy">`parse_command()` on email or SMS text</text>
+                <text x="628" y="258" class="arch-node-copy">Allowed actions: add, more_info, delete,</text>
+                <text x="628" y="278" class="arch-node-copy">remind, set_preference, or none</text>
+                <text x="628" y="298" class="arch-node-copy">Returns execution strategy + confidence</text>
+              </g>
+
+              <g>
+                <rect x="610" y="354" width="206" height="150" rx="24" fill="rgba(237, 248, 245, 0.96)" stroke="rgba(45,125,115,0.34)"></rect>
+                <rect x="628" y="372" width="76" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="648" y="387" class="arch-node-tag">LLM</text>
+                <text x="628" y="416" class="arch-node-title">Forwarded-preface parse</text>
+                <text x="628" y="440" class="arch-node-copy">Email-only: classify short note above a</text>
+                <text x="628" y="460" class="arch-node-copy">forwarded school email as command,</text>
+                <text x="628" y="480" class="arch-node-copy">clarification, or ingestion</text>
+              </g>
+
+              <g>
+                <rect x="610" y="544" width="206" height="200" rx="24" fill="rgba(237, 248, 245, 0.96)" stroke="rgba(45,125,115,0.34)"></rect>
+                <rect x="628" y="562" width="76" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="648" y="577" class="arch-node-tag">LLM</text>
+                <text x="628" y="606" class="arch-node-title">Re-extract event when needed</text>
+                <text x="628" y="630" class="arch-node-copy">For `add`, if follow-up context or direct date</text>
+                <text x="628" y="650" class="arch-node-copy">parse is not enough, the app reuses the email</text>
+                <text x="628" y="670" class="arch-node-copy">analysis pipeline: links, attachments, chunking,</text>
+                <text x="628" y="690" class="arch-node-copy">then `extract_events()` again to recover a</text>
+                <text x="628" y="710" class="arch-node-copy">single actionable calendar candidate</text>
+              </g>
+
+              <g>
+                <rect x="890" y="124" width="206" height="188" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="908" y="142" width="120" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="922" y="157" class="arch-node-tag">Deterministic</text>
+                <text x="908" y="186" class="arch-node-title">Strategy router</text>
+                <text x="908" y="210" class="arch-node-copy">Accept only allowed action/strategy pairs</text>
+                <text x="908" y="230" class="arch-node-copy">Semantic path for `more_info`</text>
+                <text x="908" y="250" class="arch-node-copy">Deterministic path for add / delete / remind /</text>
+                <text x="908" y="270" class="arch-node-copy">set_preference</text>
+                <text x="908" y="290" class="arch-node-copy">Low-confidence cases return clarification</text>
+              </g>
+
+              <g>
+                <rect x="890" y="342" width="206" height="202" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="908" y="360" width="120" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="922" y="375" class="arch-node-tag">Deterministic</text>
+                <text x="908" y="404" class="arch-node-title">Follow-up execution</text>
+                <text x="908" y="428" class="arch-node-copy">`more_info`: match summary item, build reply</text>
+                <text x="908" y="448" class="arch-node-copy">from stored section snippets</text>
+                <text x="908" y="468" class="arch-node-copy">SMS ambiguity: persist numbered choice state</text>
+                <text x="908" y="488" class="arch-node-copy">Email add: choose one event or ask for clarity</text>
+                <text x="908" y="508" class="arch-node-copy">Past-only events become no-op explanations</text>
+                <text x="908" y="528" class="arch-node-copy">Multiple adds can be batch-created</text>
+              </g>
+
+              <g>
+                <rect x="890" y="576" width="206" height="220" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="908" y="594" width="120" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="922" y="609" class="arch-node-tag">Deterministic</text>
+                <text x="908" y="638" class="arch-node-title">Mutation + safety layer</text>
+                <text x="908" y="662" class="arch-node-copy">Tenant gate before every calendar mutation</text>
+                <text x="908" y="682" class="arch-node-copy">Refresh Google token if needed</text>
+                <text x="908" y="702" class="arch-node-copy">Create/delete calendar event</text>
+                <text x="908" y="722" class="arch-node-copy">Schedule reminder or write preference rule</text>
+                <text x="908" y="742" class="arch-node-copy">Persist idempotency key + audit outcome</text>
+                <text x="908" y="762" class="arch-node-copy">Fallback reply if execution fails</text>
+              </g>
+
+              <g>
+                <rect x="1170" y="144" width="240" height="162" rx="24" fill="rgba(255, 252, 244, 0.98)" stroke="rgba(213,163,79,0.44)"></rect>
+                <rect x="1188" y="162" width="96" height="22" rx="11" fill="rgba(213,163,79,0.18)"></rect>
+                <text x="1202" y="177" class="arch-node-tag">External</text>
+                <text x="1188" y="206" class="arch-node-title">Outbound channels</text>
+                <text x="1188" y="230" class="arch-node-copy">Reply email via Resend</text>
+                <text x="1188" y="250" class="arch-node-copy">Reply SMS via Twilio</text>
+                <text x="1188" y="270" class="arch-node-copy">Calendar mutation via provider adapter</text>
+                <text x="1188" y="290" class="arch-node-copy">Mock/live modes share the same contract</text>
+              </g>
+
+              <g>
+                <rect x="1170" y="344" width="240" height="194" rx="24" fill="rgba(247, 241, 236, 0.96)" stroke="rgba(140,108,85,0.3)"></rect>
+                <rect x="1188" y="362" width="88" height="22" rx="11" fill="rgba(140,108,85,0.12)"></rect>
+                <text x="1208" y="377" class="arch-node-tag">Storage</text>
+                <text x="1188" y="406" class="arch-node-title">State written back</text>
+                <text x="1188" y="430" class="arch-node-copy">`NotificationDelivery`</text>
+                <text x="1188" y="450" class="arch-node-copy">`Event`, `Reminder`, preference rules</text>
+                <text x="1188" y="470" class="arch-node-copy">`IdempotencyKey` and `DecisionAudit`</text>
+                <text x="1188" y="490" class="arch-node-copy">`SmsConversationState` when clarification</text>
+                <text x="1188" y="510" class="arch-node-copy">is required</text>
+              </g>
+
+              <g>
+                <rect x="1170" y="574" width="240" height="210" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="1188" y="592" width="120" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="1202" y="607" class="arch-node-tag">User-facing</text>
+                <text x="1188" y="636" class="arch-node-title">What the parent receives</text>
+                <text x="1188" y="660" class="arch-node-copy">Confirmation that an event was added,</text>
+                <text x="1188" y="680" class="arch-node-copy">deleted, or scheduled for reminder</text>
+                <text x="1188" y="700" class="arch-node-copy">`more_info` answer grounded in stored snippets</text>
+                <text x="1188" y="720" class="arch-node-copy">Clarification prompts when the command</text>
+                <text x="1188" y="740" class="arch-node-copy">is ambiguous or references multiple items</text>
+                <text x="1188" y="760" class="arch-node-copy">Same or selected response channel</text>
+              </g>
+            </g>
+
+            <g stroke="var(--arch-arrow)" stroke-width="3" fill="none" marker-end="url(#arch-arrowhead-2)">
+              <path d="M256 210 C290 210 294 210 330 210"></path>
+              <path d="M256 394 C290 394 294 394 330 394"></path>
+              <path d="M433 296 L433 330"></path>
+              <path d="M433 524 L433 558"></path>
+              <path d="M536 212 C568 212 576 212 610 212"></path>
+              <path d="M536 428 C568 428 576 428 610 428"></path>
+              <path d="M536 648 C568 648 576 648 610 648"></path>
+              <path d="M816 232 C850 232 860 232 890 232"></path>
+              <path d="M816 648 C850 648 860 648 890 648"></path>
+              <path d="M713 312 L713 354"></path>
+              <path d="M713 504 L713 544"></path>
+              <path d="M993 312 L993 342"></path>
+              <path d="M993 544 L993 576"></path>
+              <path d="M1096 226 C1132 226 1140 226 1170 226"></path>
+              <path d="M1096 442 C1132 442 1140 442 1170 442"></path>
+              <path d="M1096 682 C1132 682 1140 682 1170 682"></path>
+            </g>
+
+            <g stroke="var(--arch-arrow)" stroke-width="2.5" fill="none" stroke-dasharray="8 8" marker-end="url(#arch-arrowhead-2)">
+              <path d="M430 428 C540 428 560 890 1184 890"></path>
+            </g>
+
+            <text x="700" y="894" class="arch-node-copy">SMS-only disambiguation loops through stored conversation state until one actionable item is selected.</text>
+          </svg>
+        </div>
+      </div>
+    </article>
+
+    <div class="arch-notes">
+      <article class="arch-note">
+        <h3>Why the split is useful</h3>
+        <p>Across both diagrams, the model is used for interpretation and compression, not for trust or mutation safety. All side effects stay behind deterministic gates.</p>
+      </article>
+      <article class="arch-note">
+        <h3>Where context lives</h3>
+        <p>`FollowupContext` and `SmsConversationState` are the connective tissue that let a short follow-up like “add that one” or “tell me more about swim” resolve without re-reading the whole thread manually.</p>
+      </article>
+    </div>
+  </section>
+{% endblock %}

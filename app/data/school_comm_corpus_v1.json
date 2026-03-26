@@ -1,0 +1,372 @@
+{
+  "version": "v1",
+  "generated_at": "2026-03-17T00:00:00Z",
+  "taxonomy": {
+    "topics": [
+      "operations/calendar",
+      "parent action items",
+      "parent engagement",
+      "academic reporting",
+      "classroom logistics",
+      "extracurriculars/clubs",
+      "sports",
+      "arts/performances",
+      "assemblies/culture",
+      "fundraising",
+      "giving/community care",
+      "health/safety",
+      "emergency/disruption",
+      "heritage/inclusion",
+      "parent resources",
+      "special one-off notices"
+    ],
+    "event_types": [
+      "newsletter roundup",
+      "family event",
+      "registration",
+      "reporting deadline",
+      "health notice",
+      "weather closure",
+      "fundraising drive",
+      "community care drive",
+      "club flyer",
+      "assembly invitation",
+      "parent resource session"
+    ],
+    "commonness": [
+      "routine",
+      "seasonal",
+      "exceptional"
+    ],
+    "doc_types": [
+      "newsletter",
+      "event_invite",
+      "registration_flyer",
+      "closure_notice",
+      "health_notice",
+      "fundraising_notice",
+      "resource_notice"
+    ],
+    "scopes": [
+      "classroom",
+      "school_wide",
+      "board_level",
+      "external_partner"
+    ]
+  },
+  "entries": [
+    {
+      "entry_id": "math-night-invite",
+      "doc_type": "event_invite",
+      "scope": "school_wide",
+      "topics": [
+        "parent engagement",
+        "academic reporting"
+      ],
+      "event_types": [
+        "family event"
+      ],
+      "commonness": "routine",
+      "action_required": "optional",
+      "audience": "grade-specific families",
+      "redacted_subject": "FAMILY MATH NIGHT",
+      "redacted_body": "Dear SCHOOL_NAME families, please join us for Family Math Night on Wednesday, March 11. Doors open at 5:20 PM and the event runs from 5:30 PM to 6:30 PM. Families are invited to explore math activities together and complete REGISTRATION_LINK_1 if attending.",
+      "salient_phrases": [
+        "family math night",
+        "doors open",
+        "rsvp"
+      ],
+      "source_kind": "email_body",
+      "redaction_report": {
+        "placeholder_counts": {
+          "SCHOOL_NAME": 1,
+          "REGISTRATION_LINK": 1
+        },
+        "manual_review_required": true,
+        "review_status": "reviewed_seed"
+      }
+    },
+    {
+      "entry_id": "welcome-back-newsletter",
+      "doc_type": "newsletter",
+      "scope": "school_wide",
+      "topics": [
+        "operations/calendar",
+        "classroom logistics",
+        "heritage/inclusion"
+      ],
+      "event_types": [
+        "newsletter roundup"
+      ],
+      "commonness": "routine",
+      "action_required": "none",
+      "audience": "all families",
+      "redacted_subject": "WELCOME BACK - January 2026",
+      "redacted_body": "Good afternoon SCHOOL_NAME families. Monday, January 5 is the first day back from the winter break. Upcoming dates include a school council meeting, pizza lunch, a PA Day, report cards, Family Day, and March Break. The update also includes winter weather guidance and board-level heritage month notices.",
+      "salient_phrases": [
+        "welcome back",
+        "first day back",
+        "upcoming important dates",
+        "march break"
+      ],
+      "source_kind": "attachment_text",
+      "redaction_report": {
+        "placeholder_counts": {
+          "SCHOOL_NAME": 1
+        },
+        "manual_review_required": true,
+        "review_status": "reviewed_seed"
+      }
+    },
+    {
+      "entry_id": "weather-closure",
+      "doc_type": "closure_notice",
+      "scope": "board_level",
+      "topics": [
+        "emergency/disruption",
+        "health/safety"
+      ],
+      "event_types": [
+        "weather closure"
+      ],
+      "commonness": "exceptional",
+      "action_required": "required",
+      "audience": "all families",
+      "redacted_subject": "School Closed Due to Weather",
+      "redacted_body": "Dear families, due to the weather, all schools are closed today. Please see LINK_1 for the official update and do not send students to school. Be safe.",
+      "salient_phrases": [
+        "school closed",
+        "due to weather",
+        "do not send students"
+      ],
+      "source_kind": "email_body",
+      "redaction_report": {
+        "placeholder_counts": {
+          "LINK": 1
+        },
+        "manual_review_required": true,
+        "review_status": "reviewed_seed"
+      }
+    },
+    {
+      "entry_id": "movie-night",
+      "doc_type": "event_invite",
+      "scope": "school_wide",
+      "topics": [
+        "parent engagement",
+        "arts/performances",
+        "fundraising"
+      ],
+      "event_types": [
+        "family event"
+      ],
+      "commonness": "seasonal",
+      "action_required": "optional",
+      "audience": "all families",
+      "redacted_subject": "Family Movie Night",
+      "redacted_body": "SCHOOL_NAME School Council invites all families to Movie Night in the school gym on Thursday, January 15. Doors open at 5:45 PM and the movie starts at 6:00 PM. Families should bring a reusable water bottle and stay with their children throughout the event.",
+      "salient_phrases": [
+        "movie night",
+        "doors open",
+        "school gym",
+        "stay with their children"
+      ],
+      "source_kind": "email_body",
+      "redaction_report": {
+        "placeholder_counts": {
+          "SCHOOL_NAME": 1
+        },
+        "manual_review_required": true,
+        "review_status": "reviewed_seed"
+      }
+    },
+    {
+      "entry_id": "progress-reports-interviews",
+      "doc_type": "newsletter",
+      "scope": "school_wide",
+      "topics": [
+        "academic reporting",
+        "parent action items"
+      ],
+      "event_types": [
+        "reporting deadline"
+      ],
+      "commonness": "routine",
+      "action_required": "deadline",
+      "audience": "all families",
+      "redacted_subject": "Upcoming Progress Reports and Interviews",
+      "redacted_body": "Progress reports go home on Wednesday, November 12. Parent-teacher interviews run Thursday evening and Friday morning. Families can schedule appointments online between November 6 at noon and November 13 at 4:00 PM using ACCESS_CODE_1.",
+      "salient_phrases": [
+        "progress reports",
+        "parent-teacher interviews",
+        "schedule appointments",
+        "school code"
+      ],
+      "source_kind": "attachment_text",
+      "redaction_report": {
+        "placeholder_counts": {
+          "ACCESS_CODE": 1
+        },
+        "manual_review_required": true,
+        "review_status": "reviewed_seed"
+      }
+    },
+    {
+      "entry_id": "head-lice-screening",
+      "doc_type": "health_notice",
+      "scope": "school_wide",
+      "topics": [
+        "health/safety",
+        "parent action items"
+      ],
+      "event_types": [
+        "health notice"
+      ],
+      "commonness": "exceptional",
+      "action_required": "required",
+      "audience": "all families",
+      "redacted_subject": "Head Lice Screening Day",
+      "redacted_body": "A registered nurse will conduct a school-wide head lice screening on Monday, November 10. Parents who do not want their child to participate must notify CONTACT_NAME_1 at EMAIL_1 by the same day. Families must keep students home until treatment is complete if lice or nits are found.",
+      "salient_phrases": [
+        "head lice screening",
+        "registered nurse",
+        "keep students home",
+        "opt out"
+      ],
+      "source_kind": "email_body",
+      "redaction_report": {
+        "placeholder_counts": {
+          "CONTACT_NAME": 1,
+          "EMAIL": 1
+        },
+        "manual_review_required": true,
+        "review_status": "reviewed_seed"
+      }
+    },
+    {
+      "entry_id": "december-giving",
+      "doc_type": "fundraising_notice",
+      "scope": "school_wide",
+      "topics": [
+        "giving/community care",
+        "fundraising",
+        "assemblies/culture"
+      ],
+      "event_types": [
+        "community care drive",
+        "fundraising drive"
+      ],
+      "commonness": "seasonal",
+      "action_required": "optional",
+      "audience": "all families",
+      "redacted_subject": "December Giving Initiatives",
+      "redacted_body": "SCHOOL_NAME is running a food drive from December 1 to December 12 and organizing holiday hampers for three families. Classrooms will share details for sign-up and donations. The message emphasizes empathy, giving, and community support.",
+      "salient_phrases": [
+        "food drive",
+        "holiday hampers",
+        "giving initiatives"
+      ],
+      "source_kind": "email_body",
+      "redaction_report": {
+        "placeholder_counts": {
+          "SCHOOL_NAME": 1
+        },
+        "manual_review_required": true,
+        "review_status": "reviewed_seed"
+      }
+    },
+    {
+      "entry_id": "clubs-flyer",
+      "doc_type": "registration_flyer",
+      "scope": "external_partner",
+      "topics": [
+        "extracurriculars/clubs",
+        "parent action items"
+      ],
+      "event_types": [
+        "club flyer",
+        "registration"
+      ],
+      "commonness": "routine",
+      "action_required": "deadline",
+      "audience": "grade-specific families",
+      "redacted_subject": "Lunchtime Clubs Registration",
+      "redacted_body": "External partner clubs are available at SCHOOL_NAME this winter, including STEM, coding, chess, and crafters. Sessions run at lunch between January and March, and families can register through REGISTRATION_LINK_1. Cost information and grade ranges are included.",
+      "salient_phrases": [
+        "lunchtime clubs",
+        "register",
+        "stem club",
+        "chess club"
+      ],
+      "source_kind": "attachment_text",
+      "redaction_report": {
+        "placeholder_counts": {
+          "SCHOOL_NAME": 1,
+          "REGISTRATION_LINK": 1
+        },
+        "manual_review_required": true,
+        "review_status": "reviewed_seed"
+      }
+    },
+    {
+      "entry_id": "remembrance-assembly",
+      "doc_type": "event_invite",
+      "scope": "school_wide",
+      "topics": [
+        "assemblies/culture",
+        "heritage/inclusion"
+      ],
+      "event_types": [
+        "assembly invitation"
+      ],
+      "commonness": "routine",
+      "action_required": "optional",
+      "audience": "all families",
+      "redacted_subject": "Remembrance Day Assembly",
+      "redacted_body": "The Remembrance Day Assembly takes place on Tuesday, November 11 at 10:20 AM. Parents and caregivers are invited to attend, doors open at 10:10 AM, and students are asked to wear dark bottoms and light tops. Small donations may be sent for the legion.",
+      "salient_phrases": [
+        "remembrance day assembly",
+        "doors open",
+        "students are asked to wear"
+      ],
+      "source_kind": "email_body",
+      "redaction_report": {
+        "placeholder_counts": {},
+        "manual_review_required": true,
+        "review_status": "reviewed_seed"
+      }
+    },
+    {
+      "entry_id": "parent-roadmap-session",
+      "doc_type": "resource_notice",
+      "scope": "board_level",
+      "topics": [
+        "parent resources",
+        "health/safety"
+      ],
+      "event_types": [
+        "parent resource session"
+      ],
+      "commonness": "seasonal",
+      "action_required": "optional",
+      "audience": "parents and caregivers",
+      "redacted_subject": "Social Media and Safety: A Parents' Roadmap",
+      "redacted_body": "Parents and caregivers are invited to an evening session about online exploitation, sextortion, AI, and digital safety. The event includes food, childcare, community partners, and REGISTRATION_LINK_1. Families can contact EMAIL_1 with questions.",
+      "salient_phrases": [
+        "social media and safety",
+        "parents roadmap",
+        "digital safety",
+        "childcare is available"
+      ],
+      "source_kind": "attachment_text",
+      "redaction_report": {
+        "placeholder_counts": {
+          "REGISTRATION_LINK": 1,
+          "EMAIL": 1
+        },
+        "manual_review_required": true,
+        "review_status": "reviewed_seed"
+      }
+    }
+  ]
+}

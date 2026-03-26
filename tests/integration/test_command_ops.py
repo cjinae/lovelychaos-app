@@ -113,6 +113,8 @@ def test_plain_email_more_info_uses_parser_first_detection(client, db_session):
         household_id=1,
         subject="Frankland Update",
         body_text="Space Pirates musical rehearsal details are in the gym after lunch.",
+        internet_message_id="msg-email-followup-source",
+        thread_key="msg-email-followup-source",
     )
     db_session.add(source)
     db_session.flush()
@@ -124,8 +126,26 @@ def test_plain_email_more_info_uses_parser_first_detection(client, db_session):
             response_channel="email",
             thread_or_conversation_key="msg-email-followup-source",
             summary_title="Frankland Update",
-            summary_items_shown=[{"text": "Space Pirates musical", "source_refs": [], "applies_to": [], "date_sort_key": None}],
-            all_extracted_items=[{"title": "Space Pirates musical", "reason": "school musical", "start_at": None, "end_at": None}],
+            summary_items_shown=[
+                {
+                    "text": "Space Pirates musical",
+                    "item_id": "space-pirates-email",
+                    "source_refs": [],
+                    "applies_to": [],
+                    "date_sort_key": None,
+                    "action_capabilities": {"can_add": False, "can_explain": True},
+                }
+            ],
+            all_extracted_items=[
+                {
+                    "item_id": "space-pirates-email",
+                    "title": "Space Pirates musical",
+                    "reason": "school musical",
+                    "start_at": None,
+                    "end_at": None,
+                    "action_capabilities": {"can_add": False, "can_explain": True},
+                }
+            ],
             section_snippets=[{"label": "music", "text": "Space Pirates musical rehearsal details are in the gym after lunch."}],
             expires_at=datetime.now(timezone.utc) + timedelta(days=1),
         )
@@ -137,6 +157,7 @@ def test_plain_email_more_info_uses_parser_first_detection(client, db_session):
     payload["provider_message_id"] = "msg-email-more-info"
     payload["subject"] = "Re: Frankland Update"
     payload["body_text"] = "Tell me more about Space Pirates musical"
+    payload["thread_key"] = "msg-email-followup-source"
 
     response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
 

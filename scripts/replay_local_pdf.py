@@ -39,8 +39,10 @@ def main() -> int:
     engine = OpenAIDecisionEngine(
         api_key=settings.openai_api_key,
         model=settings.openai_model,
+        reasoning_effort=settings.openai_reasoning_effort,
         timeout_sec=settings.openai_timeout_sec,
         base_url=settings.openai_base_url,
+        store_responses=settings.openai_store_responses,
     )
 
     events = []
@@ -113,7 +115,6 @@ def main() -> int:
                 "mentioned_schools": event.mentioned_schools,
                 "target_grades": event.target_grades,
                 "preference_match": event.preference_match,
-                "model_batch": event.model_batch,
                 "model_reason": event.model_reason,
             }
             for event in deduped_events

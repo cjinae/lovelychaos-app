@@ -13,6 +13,11 @@ class InboundEmailRequest(BaseModel):
     recipient_alias: str
     subject: str = ""
     body_text: str
+    email_id: str = ""
+    internet_message_id: str = ""
+    in_reply_to_message_id: str = ""
+    references_header: str = ""
+    thread_key: str = ""
 
 
 class InboundSMSRequest(BaseModel):
@@ -42,10 +47,21 @@ class OperationResponse(BaseModel):
     user_message: str
 
 
+class TeacherContactIn(BaseModel):
+    teacher_name: str = ""
+    teacher_email: str = ""
+    status: str = "active"
+
+
+class TeacherContactOut(TeacherContactIn):
+    id: int
+
+
 class ChildIn(BaseModel):
     name: str
     school_name: str
     grade: str = ""
+    teacher_contacts: list[TeacherContactIn] = Field(default_factory=list)
 
 
 class ChildOut(ChildIn):
@@ -59,11 +75,8 @@ class SettingsIn(BaseModel):
 
 class HouseholdProfileIn(BaseModel):
     admin_email: str
-    secondary_admin_email: str = ""
     admin_phone: str = ""
     timezone: str = "UTC"
-    spouse_phone: str = ""
-    spouse_notifications_enabled: bool = False
 
 
 class HouseholdProfileOut(HouseholdProfileIn):

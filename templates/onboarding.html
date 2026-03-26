@@ -1,322 +1,733 @@
 {% extends "base.html" %}
 
-{% block title %}LovelyChaos Onboarding{% endblock %}
+{% block title %}LovelyChaos Setup{% endblock %}
+
+{% block extra_head %}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* ── Simple Wizard: one step at a time, minimal, short page ── */
+  :root {
+    --lc-bg: #fdfaf7;
+    --lc-surface: #ffffff;
+    --lc-ink: #1a1614;
+    --lc-ink-soft: #7a706a;
+    --lc-accent: hsl(4 70% 50%);
+    --lc-accent-soft: hsl(4 78% 97%);
+    --lc-line: #e8e0d8;
+    --lc-shadow-card: 0 8px 32px rgba(26,22,20,0.08);
+    --lc-radius-md: 20px;
+    --lc-radius-lg: 28px;
+    --lc-font-serif: 'DM Sans', sans-serif;
+    --lc-font-sans: 'DM Sans', sans-serif;
+  }
+
+  body { background: #fdfaf7; }
+  .lc-orb--one { opacity: 0.4; }
+  .lc-orb--two { opacity: 0.3; }
+
+  .lc-sitebar { background: rgba(253,250,247,0.88); border-bottom-color: rgba(210,200,190,0.4); }
+  .lc-brand::before { background: var(--lc-accent); }
+  .lc-nav__link:hover, .lc-nav__link.is-active { background: rgba(255,255,255,0.8); color: var(--lc-ink); }
+
+  .lc-display {
+    font-size: clamp(32px, 5vw, 52px);
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 700;
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+  }
+  .lc-lead { font-size: 16px; font-weight: 400; color: var(--lc-ink-soft); }
+
+  /* ── Wizard shell ── */
+  .wiz {
+    max-width: 560px;
+    margin: 0 auto;
+  }
+
+  /* Progress dots */
+  .wiz-dots {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 32px;
+  }
+  .wiz-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--lc-line);
+    transition: background 240ms ease, width 240ms ease;
+    flex-shrink: 0;
+  }
+  .wiz-dot.is-active {
+    background: var(--lc-accent);
+    width: 24px;
+  }
+  .wiz-dot.is-done {
+    background: rgba(80,160,100,0.6);
+  }
+  .wiz-step-count {
+    margin-left: auto;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--lc-ink-soft);
+    letter-spacing: 0.04em;
+  }
+
+  /* Step card */
+  .wiz-card {
+    background: #ffffff;
+    border: 1px solid var(--lc-line);
+    border-radius: var(--lc-radius-lg);
+    box-shadow: var(--lc-shadow-card);
+    padding: 36px 40px 32px;
+    display: none;
+  }
+  .wiz-card.is-visible { display: block; }
+
+  .wiz-card__eyebrow {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--lc-accent);
+    margin: 0 0 10px;
+  }
+  .wiz-card__title {
+    font-family: 'DM Sans', sans-serif;
+    font-size: clamp(22px, 3vw, 28px);
+    font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    margin: 0 0 8px;
+  }
+  .wiz-card__desc {
+    font-size: 15px;
+    color: var(--lc-ink-soft);
+    line-height: 1.6;
+    margin: 0 0 24px;
+  }
+  .wiz-card__divider {
+    height: 1px;
+    background: var(--lc-line);
+    margin: 0 -40px 24px;
+  }
+
+  /* Nav buttons */
+  .wiz-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px solid var(--lc-line);
+  }
+  .wiz-back {
+    background: transparent;
+    border: none;
+    padding: 0;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--lc-ink-soft);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: color 140ms ease;
+  }
+  .wiz-back:hover { color: var(--lc-ink); }
+  .wiz-back[hidden] { visibility: hidden; }
+  .wiz-next {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 0 22px;
+    background: var(--lc-ink);
+    color: #fdfaf7;
+    border: none;
+    border-radius: 999px;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 140ms ease, transform 140ms ease;
+  }
+  .wiz-next:hover { opacity: 0.88; transform: translateY(-1px); }
+  .wiz-next--accent { background: var(--lc-accent); }
+
+  /* Save+continue button inside forms */
+  .wiz-save-continue {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 0 22px;
+    background: var(--lc-ink);
+    color: #fdfaf7;
+    border-radius: 999px;
+    border: none;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 140ms ease;
+    width: 100%;
+    justify-content: center;
+    margin-top: 4px;
+  }
+  .wiz-save-continue:hover { opacity: 0.88; }
+
+  /* Override form inputs for wizard */
+  .lc-input, .lc-textarea {
+    border-color: rgba(200,190,180,0.5);
+    border-radius: 12px;
+    background: #fdfaf7;
+    font-family: 'DM Sans', sans-serif;
+  }
+  .lc-input[readonly] { background: rgba(240,234,226,0.6); }
+  .lc-input:focus, .lc-textarea:focus { border-color: var(--lc-accent); box-shadow: 0 0 0 3px rgba(217,79,67,0.1); }
+
+  .lc-check { border-color: rgba(200,190,180,0.5); border-radius: 14px; background: #fdfaf7; }
+  .lc-check input { accent-color: var(--lc-accent); }
+  .lc-check__title { font-size: 14px; font-weight: 600; }
+  .lc-check__copy { font-size: 13px; color: var(--lc-ink-soft); }
+
+  .lc-note { background: rgba(240,234,226,0.7); border-radius: 12px; font-size: 13px; }
+  .lc-note strong { color: var(--lc-ink); }
+
+  .lc-field__label { font-size: 12px; font-weight: 600; letter-spacing: 0.12em; color: var(--lc-ink-soft); }
+
+  .lc-pill { border-radius: 999px; background: rgba(255,255,255,0.75); border-color: rgba(200,190,180,0.6); }
+  .lc-pill--secondary { background: rgba(240,234,226,0.6); border-color: rgba(200,190,180,0.45); }
+
+  .lc-list-item { border-color: rgba(200,190,180,0.45); background: rgba(255,255,255,0.6); border-radius: 12px; }
+  .lc-empty { border-radius: 12px; border-color: rgba(200,190,180,0.4); background: rgba(255,255,255,0.5); font-size: 14px; }
+
+  .school-suggestions { background: #ffffff; border-color: rgba(200,190,180,0.6); border-radius: 14px; }
+  .school-suggestion:hover { background: rgba(240,234,226,0.8); }
+  .school-suggestion.is-active { background: rgba(240,234,226,0.95); }
+
+  /* ── Step 1: Calendar connect ── */
+  .wiz-cal-connect {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 0 4px;
+    text-align: center;
+  }
+  .wiz-cal-icon {
+    width: 64px;
+    height: 64px;
+    border-radius: 18px;
+    background: var(--lc-accent-soft);
+    border: 1px solid rgba(217,79,67,0.18);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 28px;
+  }
+  .wiz-connect-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 48px;
+    padding: 0 28px;
+    background: var(--lc-accent);
+    color: #ffffff;
+    border-radius: 999px;
+    text-decoration: none;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 15px;
+    font-weight: 600;
+    transition: opacity 140ms ease, transform 140ms ease;
+  }
+  .wiz-connect-btn:hover { opacity: 0.88; transform: translateY(-1px); }
+  .wiz-connected-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    background: rgba(80,160,100,0.1);
+    border: 1px solid rgba(80,160,100,0.3);
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #2e7d47;
+  }
+  .wiz-connected-badge::before {
+    content: "✓";
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .wiz-cal-or {
+    font-size: 12px;
+    color: var(--lc-ink-soft);
+    margin: 4px 0;
+  }
+
+  /* ── Step 2: Child list with remove ── */
+  .lc-list-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+  }
+  .child-remove-btn {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--lc-ink-soft);
+    font-size: 16px;
+    line-height: 1;
+    padding: 4px 6px;
+    border-radius: 6px;
+    transition: color 120ms ease, background 120ms ease;
+    flex-shrink: 0;
+  }
+  .child-remove-btn:hover { color: var(--lc-accent); background: rgba(217,79,67,0.07); }
+
+  /* ── Step 3: Preferences realtime ── */
+  .prefs-topics {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 48px;
+    padding: 14px 16px;
+    background: rgba(240,234,226,0.5);
+    border-radius: 14px;
+    border: 1px solid rgba(200,190,180,0.4);
+    margin-bottom: 20px;
+    transition: opacity 200ms ease;
+  }
+  .prefs-topics.is-loading { opacity: 0.5; }
+  .prefs-topics__empty {
+    font-size: 13px;
+    color: var(--lc-ink-soft);
+    text-align: center;
+    padding: 4px 0;
+  }
+  .prefs-topics__row { display: flex; flex-direction: column; gap: 6px; }
+  .prefs-topics__label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--lc-ink-soft);
+  }
+  .prefs-topics__pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .prefs-pill {
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid;
+    animation: pill-in 180ms ease both;
+  }
+  .prefs-pill--pos { background: rgba(80,160,100,0.1); border-color: rgba(80,160,100,0.3); color: #2e7d47; }
+  .prefs-pill--neg { background: rgba(200,190,180,0.2); border-color: rgba(180,170,160,0.5); color: var(--lc-ink-soft); }
+  @keyframes pill-in { from { opacity: 0; transform: scale(0.85); } to { opacity: 1; transform: scale(1); } }
+
+  @media (max-width: 600px) {
+    .wiz-card { padding: 28px 24px 24px; }
+    .wiz-card__divider { margin: 0 -24px 20px; }
+  }
+</style>
+{% endblock %}
 
 {% block hero %}
-  <section class="lc-hero">
-    <div class="lc-hero__copy">
-      <p class="lc-eyebrow">Family Setup</p>
-      <h1 class="lc-display">A calmer start for a busy household.</h1>
-      <p class="lc-lead">Onboarding should feel like the public homepage translated into action: warm, legible, and step-based rather than looking like a raw settings dump.</p>
-      <div class="lc-pill-row">
-        <span class="lc-pill">Profile</span>
-        <span class="lc-pill">Kids + schools</span>
-        <span class="lc-pill">Calendar connection</span>
-      </div>
-    </div>
-    <div class="lc-hero__aside">
-      <a class="lc-button" href="/auth/google/start?household_id=1">Connect Google Calendar</a>
-      <a class="lc-button lc-button--secondary" href="/design-language">Open design language</a>
-    </div>
-  </section>
+  <div style="max-width: 560px; margin: 0 auto 40px;">
+    <p class="lc-eyebrow" style="margin-bottom: 10px;">Family Setup</p>
+    <h1 class="lc-display">A calmer start for a busy household.</h1>
+    <p class="lc-lead" style="margin-top: 12px;">Five quick steps. Takes about ten minutes.</p>
+  </div>
 {% endblock %}
 
 {% block page %}
-  <section class="lc-grid lc-grid--three">
-    <article class="lc-stat">
-      <p class="lc-stat__value">1</p>
-      <p class="lc-stat__label">Set the family profile and communication defaults.</p>
-    </article>
-    <article class="lc-stat">
-      <p class="lc-stat__value">2</p>
-      <p class="lc-stat__label">Add children and schools so timezone and relevancy stay grounded.</p>
-    </article>
-    <article class="lc-stat">
-      <p class="lc-stat__value">3</p>
-      <p class="lc-stat__label">Connect Google Calendar so the assistant can move from analysis to action.</p>
-    </article>
-  </section>
+  <div class="wiz" id="wizard">
+    <!-- Progress dots -->
+    <div class="wiz-dots" id="wiz-dots" aria-hidden="true">
+      <div class="wiz-dot is-active" data-step="0"></div>
+      <div class="wiz-dot" data-step="1"></div>
+      <div class="wiz-dot" data-step="2"></div>
+      <div class="wiz-dot" data-step="3"></div>
+      <div class="wiz-dot" data-step="4"></div>
+      <span class="wiz-step-count" id="wiz-count">1 of 5</span>
+    </div>
 
-  <section class="lc-stack" style="margin-top: 24px;">
-    <article class="lc-card">
-      <div class="lc-card__head">
-        <p class="lc-eyebrow">Step 1</p>
-        <h2 class="lc-section-title">Family profile</h2>
-        <p class="lc-intro">Capture the adults, default timezone, and phone context before routing starts.</p>
-      </div>
-      <form class="lc-form" method="post" action="/onboarding/profile/form">
-        <div class="lc-form-grid lc-form-grid--two">
-          <label class="lc-field">
-            <span class="lc-field__label">Admin email</span>
-            <input class="lc-input" name="admin_email" type="email" value="{{ profile.admin_email }}" required />
-          </label>
-          <label class="lc-field">
-            <span class="lc-field__label">Second parent email</span>
-            <input class="lc-input" name="secondary_admin_email" type="email" value="{{ profile.secondary_admin_email }}" />
-          </label>
-          <label class="lc-field">
-            <span class="lc-field__label">Admin phone</span>
-            <input class="lc-input" name="admin_phone" value="{{ profile.admin_phone }}" />
-          </label>
-          <label class="lc-field">
-            <span class="lc-field__label">Spouse phone</span>
-            <input class="lc-input" name="spouse_phone" value="{{ profile.spouse_phone }}" />
-          </label>
-        </div>
-        <div class="lc-form-grid lc-form-grid--two">
-          <label class="lc-field">
-            <span class="lc-field__label">Timezone</span>
-            <input class="lc-input" id="timezone_value" name="timezone_value" value="{{ profile.timezone }}" readonly />
-          </label>
-          <label class="lc-check">
-            <input type="checkbox" name="spouse_notifications_enabled" {% if profile.spouse_notifications_enabled %}checked{% endif %} />
-            <span>
-              <span class="lc-check__title">Spouse notifications enabled</span>
-              <span class="lc-check__copy">Allow receive-only notifications for the second caregiver.</span>
-            </span>
-          </label>
-        </div>
-        <p class="lc-note" id="school-timezone-status">Timezone is derived from the selected school when possible.</p>
-        <button class="lc-button" type="submit">Save family profile</button>
-      </form>
-    </article>
+    <!-- Step 1: Connect Google + Phone -->
+    <div class="wiz-card is-visible" id="wiz-step-0">
+      <p class="wiz-card__eyebrow">Step 1</p>
+      <h2 class="wiz-card__title">Connect your Google account</h2>
+      <p class="wiz-card__desc">We use your Google account to get your email address, timezone, and calendar access — the foundation for everything that follows.</p>
+      <div class="wiz-card__divider"></div>
 
-    <article class="lc-card">
-      <div class="lc-card__head">
-        <p class="lc-eyebrow">Step 2</p>
-        <h2 class="lc-section-title">Kids and schools</h2>
-        <p class="lc-intro">School context powers timezone resolution and helps LovelyChaos decide what matters to your household.</p>
+      <div class="wiz-cal-connect">
+        <div class="wiz-cal-icon">📅</div>
+        {% if calendar_connected %}
+          <div class="wiz-connected-badge">Connected as {{ calendar_email }}</div>
+          <p class="wiz-cal-or">Want to use a different account?</p>
+          <a class="wiz-connect-btn" href="/auth/google/start?household_id=1&next=/onboarding" style="background: var(--lc-ink); font-size: 13px; min-height: 40px; padding: 0 20px;">Reconnect Google</a>
+        {% else %}
+          <a class="wiz-connect-btn" href="/auth/google/start?household_id=1&next=/onboarding">Connect Google Calendar</a>
+        {% endif %}
       </div>
-      <div class="lc-list">
+
+      {% if calendar_connected %}
+      <div style="margin-top: 24px; border-top: 1px solid var(--lc-line); padding-top: 20px;">
+        <form class="lc-form" method="post" action="/onboarding/profile/form" id="form-profile">
+          <label class="lc-field">
+            <span class="lc-field__label">Phone number</span>
+            <input class="lc-input" name="admin_phone" type="tel" value="{{ profile.admin_phone }}" placeholder="e.g. +1 416 555 0100" />
+          </label>
+          <p class="lc-note" style="margin-top: 6px; padding: 10px 14px;">We'll send you urgent school alerts by text when it matters most.</p>
+          <button class="wiz-save-continue" type="submit" style="margin-top: 16px;">Save and continue →</button>
+        </form>
+      </div>
+      {% else %}
+      <p class="lc-note" style="margin-top: 20px; padding: 12px 16px; text-align: center;">Connect Google first to continue setup.</p>
+      {% endif %}
+    </div>
+
+    <!-- Step 2: Kids and Schools -->
+    <div class="wiz-card" id="wiz-step-1">
+      <p class="wiz-card__eyebrow">Step 2</p>
+      <h2 class="wiz-card__title">Kids and schools</h2>
+      <p class="wiz-card__desc">Add each child, their school, and their teacher. This is how LovelyChaos knows which emails actually matter to your household.</p>
+      <div class="wiz-card__divider"></div>
+      <div class="lc-list" id="children-list" style="margin-bottom: 18px;">
         {% for child in children %}
-          <div class="lc-list-item">
+          <div class="lc-list-item" data-child-id="{{ child.id }}">
             <div>
               <p class="lc-list-item__title">{{ child.name }}</p>
-              <p class="lc-list-item__meta">{{ child.school_name }}{% if child.grade %} · {{ child.grade }}{% endif %}</p>
+              <p class="lc-list-item__meta">{{ child.school_name }}{% if child.grade %} &middot; {{ child.grade }}{% endif %}{% if child.teacher_contacts %} &middot; {{ child.teacher_contacts[0].teacher_name or child.teacher_contacts[0].teacher_email }}{% endif %}</p>
             </div>
+            <button class="child-remove-btn" type="button" data-child-id="{{ child.id }}" title="Remove {{ child.name }}">✕</button>
           </div>
         {% else %}
-          <p class="lc-empty">No children added yet.</p>
+          <p class="lc-empty" id="children-empty">No children added yet — add one below.</p>
         {% endfor %}
       </div>
-      <form class="lc-form" method="post" action="/onboarding/children/form" style="margin-top: 18px;">
+      <form class="lc-form" method="post" action="/onboarding/children/form" id="form-children">
         <div class="lc-form-grid lc-form-grid--two">
           <label class="lc-field">
-            <span class="lc-field__label">Child name</span>
-            <input class="lc-input" name="name" placeholder="Child name" required />
+            <span class="lc-field__label">Child's name</span>
+            <input class="lc-input" name="name" placeholder="e.g. Maya" required />
           </label>
           <label class="lc-field">
             <span class="lc-field__label">Grade</span>
-            <input class="lc-input" name="grade" placeholder="Grade" />
+            <input class="lc-input" name="grade" placeholder="e.g. Grade 3" />
           </label>
         </div>
         <label class="lc-field">
           <span class="lc-field__label">School</span>
           <span class="school-autocomplete">
-            <input class="lc-input" name="school_name" placeholder="School" required autocomplete="off" data-school-autocomplete />
+            <input class="lc-input" name="school_name" placeholder="School name" required autocomplete="off" data-school-autocomplete />
             <div class="school-suggestions" data-school-suggestions></div>
           </span>
         </label>
-        <button class="lc-button" type="submit">Add child</button>
+        <label class="lc-field">
+          <span class="lc-field__label">Teacher name</span>
+          <input class="lc-input" name="teacher_contacts_text" placeholder="e.g. Ms. Smith &lt;smith@school.ca&gt;" />
+        </label>
+        <button class="wiz-save-continue" type="submit">Add child →</button>
       </form>
-    </article>
-
-    <article class="lc-card">
-      <div class="lc-card__head">
-        <p class="lc-eyebrow">Step 3</p>
-        <h2 class="lc-section-title">Digests</h2>
-        <p class="lc-intro">Choose how often LovelyChaos sends slower-moving family summaries.</p>
+      <div class="wiz-nav">
+        <button class="wiz-back" type="button" data-prev="0">← Back</button>
+        <button class="wiz-next" type="button" data-next="2" id="step2-continue">Done adding kids →</button>
       </div>
-      <form class="lc-form" method="post" action="/onboarding/settings/form">
+    </div>
+
+    <!-- Step 3: Priorities -->
+    <div class="wiz-card" id="wiz-step-2">
+      <p class="wiz-card__eyebrow">Step 3</p>
+      <h2 class="wiz-card__title">What matters to you</h2>
+      <p class="wiz-card__desc">Describe your household in your own words. LovelyChaos will figure out what to surface and what to quietly ignore.</p>
+      <div class="wiz-card__divider"></div>
+      <form class="lc-form" method="post" action="/onboarding/preferences/form" id="form-prefs">
+
+        <!-- Free-form text first -->
+        <label class="lc-field" style="margin-bottom: 16px;">
+          <span class="lc-field__label">Your household, in your words</span>
+          <span class="lc-note" style="display: block; margin-bottom: 8px;">Pizza days, swim meets, early dismissals — or "I don't care about PA days." Write whatever feels right.</span>
+          <textarea class="lc-textarea" name="raw_text" id="prefs-raw-text" style="min-height: 110px;" placeholder="e.g. We care a lot about hockey schedules and pizza day reminders. Not interested in fundraising emails.">{{ prefs.raw_text }}</textarea>
+        </label>
+
+        <!-- Defaults at the bottom -->
+        <div style="margin-bottom: 20px;">
+          <p class="lc-field__label" style="margin-bottom: 8px;">Defaults — already on</p>
+          {% for item in prefs.system_defaults %}
+            <label class="lc-check">
+              <input type="checkbox" name="system_default_{{ item.key }}" {% if item.enabled %}checked{% endif %} />
+              <span>
+                <span class="lc-check__title">{{ item.label }}</span>
+                <span class="lc-check__copy">{{ item.description }}</span>
+              </span>
+            </label>
+          {% endfor %}
+        </div>
+
+        {% if prefs.preference_parse_status == "error" %}
+          <p class="lc-note" style="border: 1px solid rgba(217,79,67,0.3); background: rgba(217,79,67,0.07); color: #8a3020; margin-bottom: 12px;"><strong>Could not interpret last save.</strong> Try again.</p>
+        {% elif prefs.raw_text.strip() %}
+          <p class="lc-note" style="margin-bottom: 12px;">LovelyChaos saved your notes. Structured topics are available in admin if you want to review or edit them.</p>
+        {% endif %}
+
+        <button class="wiz-save-continue" type="submit">Save and continue →</button>
+      </form>
+      <div class="wiz-nav">
+        <button class="wiz-back" type="button" data-prev="1">← Back</button>
+        <button class="wiz-next" type="button" data-next="3">Skip →</button>
+      </div>
+    </div>
+
+    <!-- Step 4: Digests -->
+    <div class="wiz-card" id="wiz-step-3">
+      <p class="wiz-card__eyebrow">Step 4</p>
+      <h2 class="wiz-card__title">Digest cadence</h2>
+      <p class="wiz-card__desc">Batch the slow-moving stuff — newsletters, FYI emails — into a daily or weekly summary.</p>
+      <div class="wiz-card__divider"></div>
+      <form class="lc-form" method="post" action="/onboarding/settings/form" id="form-settings">
         <label class="lc-check">
           <input type="checkbox" name="daily_summary_enabled" {% if settings.daily_summary_enabled %}checked{% endif %} />
           <span>
-            <span class="lc-check__title">Enable daily summary</span>
-            <span class="lc-check__copy">Collect informational updates into a single daily digest.</span>
+            <span class="lc-check__title">Daily summary</span>
+            <span class="lc-check__copy">One digest per day. Ideal for fast-moving inboxes.</span>
           </span>
         </label>
         <label class="lc-check">
           <input type="checkbox" name="weekly_digest_enabled" {% if settings.weekly_digest_enabled %}checked{% endif %} />
           <span>
-            <span class="lc-check__title">Enable weekly digest</span>
-            <span class="lc-check__copy">Use a weekly summary for slower-moving logistics and reminders.</span>
+            <span class="lc-check__title">Weekly digest</span>
+            <span class="lc-check__copy">A Sunday roundup of slower logistics and reminders.</span>
           </span>
         </label>
-        <button class="lc-button" type="submit">Save routing settings</button>
+        <button class="wiz-save-continue" type="submit">Save and continue →</button>
       </form>
-    </article>
+      <div class="wiz-nav">
+        <button class="wiz-back" type="button" data-prev="2">← Back</button>
+        <button class="wiz-next" type="button" data-next="4">Skip →</button>
+      </div>
+    </div>
 
-    <article class="lc-card">
-      <div class="lc-card__head">
-        <p class="lc-eyebrow">Step 4</p>
-        <h2 class="lc-section-title">Priority profile</h2>
-        <p class="lc-intro">System defaults keep the basics on, while your custom priorities teach LovelyChaos what this household cares about.</p>
+    <!-- Step 5: Final -->
+    <div class="wiz-card" id="wiz-step-4">
+      <p class="wiz-card__eyebrow">Step 5</p>
+      <h2 class="wiz-card__title">You're all set</h2>
+      <p class="wiz-card__desc">LovelyChaos is ready. Forward school emails to <strong>schedule@lovelychaos.ca</strong> and it will start sorting, summarizing, and creating calendar events automatically.</p>
+      <div class="wiz-card__divider"></div>
+      <div style="display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 8px 0; text-align: center;">
+        <div style="font-size: 48px;">🎉</div>
+        <p class="lc-note" style="font-size: 13px; max-width: 38ch; text-align: center; padding: 12px 16px;">
+          Once you set up email forwarding, send a test email to <strong>schedule@lovelychaos.ca</strong> to see it in action.
+        </p>
+        <a href="/admin" class="wiz-connect-btn" style="background: var(--lc-ink);">Go to dashboard →</a>
       </div>
-      <form class="lc-form" method="post" action="/onboarding/preferences/form">
-        <div class="lc-stack" style="gap: 14px;">
-          <div>
-            <p class="lc-field__label">System default priorities</p>
-            {% for item in prefs.system_defaults %}
-              <label class="lc-check">
-                <input
-                  type="checkbox"
-                  name="system_default_{{ item.key }}"
-                  {% if item.enabled %}checked{% endif %}
-                />
-                <span>
-                  <span class="lc-check__title">{{ item.label }}</span>
-                  <span class="lc-check__copy">{{ item.description }} Examples: {{ item.examples | join(', ') }}.</span>
-                </span>
-              </label>
-            {% endfor %}
-          </div>
-          <div>
-            <p class="lc-field__label">User priority topics</p>
-            <div class="lc-pill-row" data-topic-preview>
-              {% for topic in prefs.user_priority_topics %}
-                <span class="lc-pill">{{ topic }}</span>
-              {% else %}
-                <span class="lc-pill lc-pill--secondary">No custom topics yet</span>
-              {% endfor %}
-            </div>
-            <label class="lc-field">
-              <span class="lc-field__label">Priority topics (one per line)</span>
-              <textarea class="lc-textarea" name="user_priority_topics" data-topic-textarea>{{ prefs.user_priority_topics | join('\n') }}</textarea>
-            </label>
-          </div>
-        </div>
-        <label class="lc-field">
-          <span class="lc-field__label">Raw preference notes</span>
-          <textarea class="lc-textarea" name="raw_text">{{ prefs.raw_text }}</textarea>
-        </label>
-        <div>
-          <p class="lc-field__label">Saved conversational rules</p>
-          <div class="lc-pill-row">
-            {% for rule in prefs.command_written_preferences %}
-              <span class="lc-pill lc-pill--secondary">{{ rule.label }} · {{ rule.behavior }}</span>
-            {% else %}
-              <span class="lc-pill lc-pill--secondary">No command-written rules yet</span>
-            {% endfor %}
-          </div>
-        </div>
-        <button class="lc-button" type="submit">Save priority profile</button>
-      </form>
-    </article>
-
-    <article class="lc-card lc-card--tint">
-      <div class="lc-card__head">
-        <p class="lc-eyebrow">Step 5</p>
-        <h2 class="lc-section-title">Google Calendar</h2>
-        <p class="lc-intro">Once the calendar is connected, the assistant can move from triage into direct scheduling.</p>
+      <div class="wiz-nav">
+        <button class="wiz-back" type="button" data-prev="3">← Back</button>
+        <span></span>
       </div>
-      <div class="lc-actions">
-        <a class="lc-button" href="/auth/google/start?household_id=1">Connect Google Calendar</a>
-      </div>
-      <p class="lc-note">After connecting, send real email to <strong>schedule@lovelychaos.ca</strong> once inbound provider forwarding is configured.</p>
-    </article>
-  </section>
+    </div>
+  </div>
 {% endblock %}
 
 {% block scripts %}
-  <script>
-    (() => {
-      const schoolInputs = document.querySelectorAll('[data-school-autocomplete]');
-      const timezoneInput = document.getElementById('timezone_value');
-      const status = document.getElementById('school-timezone-status');
-      const cachedMatches = new Map();
-      let activeContainer = null;
+<script>
+  (() => {
+    // ── Wizard navigation ──
+    let current = 0;
+    const total = 5;
+    const steps = Array.from(document.querySelectorAll('.wiz-card'));
+    const dots = Array.from(document.querySelectorAll('.wiz-dot'));
+    const count = document.getElementById('wiz-count');
 
-      async function fetchMatches(query) {
-        const response = await fetch(`/admin/schools/search?q=${encodeURIComponent(query)}`);
-        if (!response.ok) return [];
-        const payload = await response.json();
-        return payload.results || [];
-      }
+    function goTo(n) {
+      steps[current].classList.remove('is-visible');
+      dots[current].classList.remove('is-active');
+      if (n > current) dots[current].classList.add('is-done');
+      else dots[n].classList.remove('is-done');
+      current = n;
+      steps[current].classList.add('is-visible');
+      dots[current].classList.add('is-active');
+      count.textContent = `${current + 1} of ${total}`;
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
 
-      async function resolveSchool(name) {
-        const response = await fetch(`/admin/schools/resolve?name=${encodeURIComponent(name)}`);
-        if (!response.ok) return null;
-        return response.json();
-      }
+    document.querySelectorAll('[data-next]').forEach(btn => {
+      btn.addEventListener('click', () => goTo(parseInt(btn.dataset.next, 10)));
+    });
+    document.querySelectorAll('[data-prev]').forEach(btn => {
+      btn.addEventListener('click', () => goTo(parseInt(btn.dataset.prev, 10)));
+    });
 
-      function clearSuggestions(container) {
-        if (!container) return;
-        container.innerHTML = '';
-        container.classList.remove('is-open');
-      }
+    // ── Forms: intercept submit, POST, then advance ──
+    const formStepMap = {
+      'form-profile': 1,
+      'form-children': 1,
+      'form-prefs': 3,
+      'form-settings': 4,
+    };
 
-      function renderMatches(container, matches) {
-        clearSuggestions(container);
-        cachedMatches.clear();
-        for (const match of matches) {
-          const option = document.createElement('div');
-          option.className = 'school-suggestion';
-          option.dataset.schoolName = match.school_name;
-          option.innerHTML = `<strong>${match.school_name}</strong><small>${match.city} - ${match.board_name}</small>`;
-          container.appendChild(option);
-          cachedMatches.set(match.school_name.toLowerCase(), match);
-        }
-        if (matches.length) {
-          container.classList.add('is-open');
-          activeContainer = container;
-        }
-      }
-
-      async function updateTimezone(name) {
-        if (!name) return;
-        const cached = cachedMatches.get(name.toLowerCase());
-        const resolved = cached || await resolveSchool(name);
-        if (!resolved) {
-          status.textContent = 'School not found in GTA list. A location lookup will be used on save when possible.';
-          return;
-        }
-        timezoneInput.value = resolved.timezone || timezoneInput.value;
-        const city = resolved.city ? ` (${resolved.city})` : '';
-        status.textContent = `Timezone set to ${resolved.timezone}${city}.`;
-      }
-
-      for (const input of schoolInputs) {
-        const container = input.parentElement.querySelector('[data-school-suggestions]');
-        input.addEventListener('input', async (event) => {
-          const query = event.target.value.trim();
-          if (query.length < 2) {
-            clearSuggestions(container);
-            return;
-          }
-          renderMatches(container, await fetchMatches(query));
-        });
-        input.addEventListener('change', (event) => updateTimezone(event.target.value.trim()));
-        input.addEventListener('blur', () => {
-          window.setTimeout(() => clearSuggestions(container), 150);
-        });
-        container.addEventListener('mousedown', (event) => {
-          const option = event.target.closest('.school-suggestion');
-          if (!option) return;
-          input.value = option.dataset.schoolName || '';
-          clearSuggestions(container);
-          updateTimezone(input.value.trim());
-        });
-      }
-
-      document.addEventListener('mousedown', (event) => {
-        if (activeContainer && !event.target.closest('.school-autocomplete')) {
-          clearSuggestions(activeContainer);
-          activeContainer = null;
+    document.querySelectorAll('.lc-form[id]').forEach(form => {
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const data = new FormData(form);
+        try {
+          await fetch(form.action, { method: 'POST', body: data });
+        } catch (_) {}
+        if (form.id === 'form-children') {
+          sessionStorage.setItem('wiz-step', '1');
+          location.reload();
+        } else {
+          goTo(formStepMap[form.id]);
         }
       });
+    });
 
-      const topicTextarea = document.querySelector('[data-topic-textarea]');
-      const topicPreview = document.querySelector('[data-topic-preview]');
-      if (topicTextarea && topicPreview) {
-        const renderTopics = () => {
-          const topics = topicTextarea.value.split('\n').map((value) => value.trim()).filter(Boolean);
-          topicPreview.innerHTML = topics.length
-            ? topics.map((topic) => `<span class="lc-pill">${topic}</span>`).join('')
-            : '<span class="lc-pill lc-pill--secondary">No custom topics yet</span>';
-        };
-        topicTextarea.addEventListener('input', renderTopics);
-        renderTopics();
+    // Restore step after reload
+    const saved = sessionStorage.getItem('wiz-step');
+    if (saved !== null) {
+      sessionStorage.removeItem('wiz-step');
+      goTo(parseInt(saved, 10));
+    }
+
+    // ── Step 2: Remove child ──
+    const childrenList = document.getElementById('children-list');
+
+    function ensureChildrenEmptyState() {
+      if (!childrenList) return;
+      const hasChildren = Boolean(childrenList.querySelector('[data-child-id]'));
+      const empty = document.getElementById('children-empty');
+      if (hasChildren && empty) {
+        empty.remove();
+      } else if (!hasChildren && !empty) {
+        const emptyState = document.createElement('p');
+        emptyState.className = 'lc-empty';
+        emptyState.id = 'children-empty';
+        emptyState.textContent = 'No children added yet — add one below.';
+        childrenList.appendChild(emptyState);
       }
-    })();
-  </script>
+    }
+
+    if (childrenList) {
+      childrenList.addEventListener('click', async (event) => {
+        const btn = event.target.closest('.child-remove-btn');
+        if (!btn) return;
+        event.preventDefault();
+        const childId = btn.dataset.childId;
+        if (!childId) return;
+        btn.disabled = true;
+        try {
+          const r = await fetch(`/admin/children/${childId}`, { method: 'DELETE' });
+          if (r.ok) {
+            const row = btn.closest('.lc-list-item[data-child-id]');
+            if (row) row.remove();
+            ensureChildrenEmptyState();
+          } else {
+            btn.disabled = false;
+          }
+        } catch (_) {
+          btn.disabled = false;
+        }
+      });
+    }
+
+    // ── School autocomplete ──
+    const schoolInputs = document.querySelectorAll('[data-school-autocomplete]');
+    let activeContainer = null;
+    async function fetchMatches(q) { const r = await fetch(`/admin/schools/search?q=${encodeURIComponent(q)}`); if (!r.ok) return []; return (await r.json()).results || []; }
+    async function resolveSchool(n) { const r = await fetch(`/admin/schools/resolve?name=${encodeURIComponent(n)}`); if (!r.ok) return null; return r.json(); }
+    function clearSuggestions(c) {
+      if (!c) return;
+      c.innerHTML = '';
+      c.classList.remove('is-open');
+      c.dataset.activeIndex = '-1';
+    }
+    function getSuggestionItems(c) {
+      return Array.from(c.querySelectorAll('.school-suggestion'));
+    }
+    function setActiveSuggestion(c, index) {
+      const items = getSuggestionItems(c);
+      if (!items.length) {
+        c.dataset.activeIndex = '-1';
+        return;
+      }
+      const nextIndex = Math.max(0, Math.min(index, items.length - 1));
+      c.dataset.activeIndex = String(nextIndex);
+      items.forEach((item, itemIndex) => {
+        item.classList.toggle('is-active', itemIndex === nextIndex);
+      });
+    }
+    function selectSuggestion(input, c, option) {
+      if (!option) return;
+      input.value = option.dataset.schoolName || '';
+      clearSuggestions(c);
+    }
+    function renderMatches(c, matches) {
+      clearSuggestions(c);
+      for (const m of matches) {
+        const o = document.createElement('div');
+        o.className = 'school-suggestion';
+        o.dataset.schoolName = m.school_name;
+        o.innerHTML = `<strong>${m.school_name}</strong><small>${m.city} - ${m.board_name}</small>`;
+        c.appendChild(o);
+      }
+      if (matches.length) {
+        c.classList.add('is-open');
+        activeContainer = c;
+        setActiveSuggestion(c, 0);
+      }
+    }
+    for (const input of schoolInputs) {
+      const container = input.parentElement.querySelector('[data-school-suggestions]');
+      input.addEventListener('input', async (e) => { const q = e.target.value.trim(); if (q.length < 2) { clearSuggestions(container); return; } renderMatches(container, await fetchMatches(q)); });
+      input.addEventListener('keydown', (e) => {
+        const items = getSuggestionItems(container);
+        if (!items.length) return;
+        const currentIndex = Number(container.dataset.activeIndex || '-1');
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setActiveSuggestion(container, currentIndex + 1);
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setActiveSuggestion(container, currentIndex <= 0 ? items.length - 1 : currentIndex - 1);
+          return;
+        }
+        if (e.key === 'Enter') {
+          const activeIndex = Number(container.dataset.activeIndex || '-1');
+          if (activeIndex >= 0) {
+            e.preventDefault();
+            selectSuggestion(input, container, items[activeIndex]);
+          }
+          return;
+        }
+        if (e.key === 'Escape') {
+          clearSuggestions(container);
+        }
+      });
+      input.addEventListener('blur', () => { window.setTimeout(() => clearSuggestions(container), 150); });
+      container.addEventListener('mousemove', (e) => {
+        const o = e.target.closest('.school-suggestion');
+        if (!o) return;
+        const items = getSuggestionItems(container);
+        const index = items.indexOf(o);
+        if (index >= 0) setActiveSuggestion(container, index);
+      });
+      container.addEventListener('mousedown', (e) => {
+        const o = e.target.closest('.school-suggestion');
+        if (!o) return;
+        e.preventDefault();
+        selectSuggestion(input, container, o);
+      });
+    }
+    document.addEventListener('mousedown', (e) => { if (activeContainer && !e.target.closest('.school-autocomplete')) { clearSuggestions(activeContainer); activeContainer = null; } });
+  })();
+</script>
 {% endblock %}

@@ -1,0 +1,59 @@
+{
+  "version": "v1",
+  "generated_at": "2026-03-17T00:00:00Z",
+  "items": [
+    {
+      "entry_id": "movie-night",
+      "expected_topics": [
+        "parent engagement",
+        "arts/performances",
+        "fundraising"
+      ],
+      "expected_event_types": [
+        "family event"
+      ],
+      "expected_commonness": "seasonal",
+      "expected_action_required": "optional",
+      "summary_weight": "mentioned"
+    },
+    {
+      "entry_id": "progress-reports-interviews",
+      "expected_topics": [
+        "academic reporting",
+        "parent action items"
+      ],
+      "expected_event_types": [
+        "reporting deadline"
+      ],
+      "expected_commonness": "routine",
+      "expected_action_required": "deadline",
+      "summary_weight": "important"
+    },
+    {
+      "entry_id": "head-lice-screening",
+      "expected_topics": [
+        "health/safety",
+        "parent action items"
+      ],
+      "expected_event_types": [
+        "health notice"
+      ],
+      "expected_commonness": "exceptional",
+      "expected_action_required": "required",
+      "summary_weight": "important"
+    },
+    {
+      "entry_id": "weather-closure",
+      "expected_topics": [
+        "emergency/disruption",
+        "health/safety"
+      ],
+      "expected_event_types": [
+        "weather closure"
+      ],
+      "expected_commonness": "exceptional",
+      "expected_action_required": "required",
+      "summary_weight": "important"
+    }
+  ]
+}

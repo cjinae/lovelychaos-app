@@ -4,6 +4,10 @@
 - Jina Lee is the CTO of this project.
 - For project background, strategy, or source-of-truth context, refer to [`lovelychaos.docx`](/Users/jinaelee/projects/lovelychaos/lovelychaos.docx).
 
+## Product Intent
+- LovelyChaos should behave like a helpful assistant for school communication, not just a date/event operator.
+- It should explain what matters in plain language, support conversational follow-ups, and only switch into calendar/operator behavior when the user is clearly asking for scheduling help.
+
 ## Gmail Connection
 - This workspace has a local Gmail test connection for `cjinae@gmail.com`.
 - Use it for local read, draft, and send workflows when testing email loops for LovelyChaos and Resend inbox flows.

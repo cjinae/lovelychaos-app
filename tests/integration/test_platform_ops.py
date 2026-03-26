@@ -8,6 +8,10 @@ def test_health_and_ready(client):
     ready = client.get("/ready")
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
+    assert "process_id" in health.json()
+    assert "booted_at" in health.json()
+    assert "llm" in health.json()
+    assert "prompt_versions" in health.json()["llm"]
     assert ready.status_code == 200
     assert ready.json()["status"] == "ready"
 

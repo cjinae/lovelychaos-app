@@ -1,0 +1,908 @@
+{% extends "base.html" %}
+
+{% block title %}LovelyChaos Agent SDK Architecture{% endblock %}
+
+{% block extra_head %}
+  <style>
+    :root {
+      --arch-paper: rgba(255, 252, 247, 0.88);
+      --arch-paper-strong: rgba(255, 249, 241, 0.96);
+      --arch-ink-soft: rgba(55, 42, 36, 0.72);
+      --arch-line: rgba(107, 80, 67, 0.16);
+      --arch-lane: rgba(255, 246, 238, 0.68);
+      --arch-lane-strong: rgba(250, 235, 226, 0.86);
+      --arch-agent-lane: rgba(225, 244, 239, 0.96);
+      --arch-agent-card: rgba(237, 248, 245, 0.96);
+      --arch-agent-line: rgba(45, 125, 115, 0.34);
+      --arch-tool-lane: rgba(234, 240, 251, 0.95);
+      --arch-tool-card: rgba(243, 247, 253, 0.98);
+      --arch-tool-line: rgba(78, 107, 150, 0.34);
+      --arch-tool: #4e6b96;
+      --arch-input: #d5a34f;
+      --arch-rules: #f26f55;
+      --arch-agent: #2d7d73;
+      --arch-memory: #8c6c55;
+      --arch-result: #5671a6;
+      --arch-arrow: rgba(89, 62, 50, 0.42);
+    }
+
+    .lc-hero--diagram {
+      align-items: end;
+      background:
+        radial-gradient(circle at top right, rgba(45, 125, 115, 0.14), transparent 42%),
+        linear-gradient(135deg, rgba(255, 251, 245, 0.96), rgba(255, 245, 236, 0.88));
+      border: 1px solid rgba(107, 80, 67, 0.12);
+      box-shadow: 0 28px 80px rgba(82, 54, 43, 0.08);
+    }
+
+    .lc-main {
+      width: min(calc(100vw - 40px), 1520px);
+    }
+
+    .arch-meta {
+      display: grid;
+      gap: 14px;
+    }
+
+    .arch-kicker {
+      color: var(--arch-ink-soft);
+      font-size: 0.98rem;
+      line-height: 1.7;
+      margin: 0;
+      max-width: 64ch;
+    }
+
+    .arch-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .arch-chip {
+      align-items: center;
+      background: rgba(255, 250, 244, 0.92);
+      border: 1px solid rgba(107, 80, 67, 0.14);
+      border-radius: 999px;
+      color: var(--lc-ink);
+      display: inline-flex;
+      font-size: 0.82rem;
+      gap: 8px;
+      letter-spacing: 0.04em;
+      padding: 8px 12px;
+      text-transform: uppercase;
+    }
+
+    .arch-chip__dot {
+      border-radius: 999px;
+      height: 10px;
+      width: 10px;
+    }
+
+    .arch-summary-grid {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-top: 12px;
+    }
+
+    .arch-summary {
+      background: rgba(255, 250, 246, 0.92);
+      border: 1px solid rgba(107, 80, 67, 0.12);
+      border-radius: 24px;
+      padding: 18px;
+    }
+
+    .arch-summary__label {
+      color: var(--arch-ink-soft);
+      font-size: 0.75rem;
+      letter-spacing: 0.12em;
+      margin: 0 0 8px;
+      text-transform: uppercase;
+    }
+
+    .arch-summary p:last-child {
+      margin: 0;
+    }
+
+    .arch-section {
+      display: grid;
+      gap: 18px;
+      margin-top: 32px;
+    }
+
+    .arch-card {
+      background: var(--arch-paper);
+      border: 1px solid var(--arch-line);
+      border-radius: 32px;
+      box-shadow: 0 24px 60px rgba(81, 58, 46, 0.08);
+      overflow: hidden;
+      padding: 22px;
+    }
+
+    .arch-card__head {
+      align-items: end;
+      display: flex;
+      gap: 18px;
+      justify-content: space-between;
+      margin-bottom: 18px;
+    }
+
+    .arch-card__copy {
+      color: var(--arch-ink-soft);
+      margin: 8px 0 0;
+      max-width: 72ch;
+    }
+
+    .arch-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .arch-badge {
+      background: rgba(255, 247, 239, 0.94);
+      border: 1px solid rgba(107, 80, 67, 0.14);
+      border-radius: 999px;
+      color: var(--arch-ink-soft);
+      font-size: 0.74rem;
+      letter-spacing: 0.04em;
+      padding: 7px 10px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .arch-badge code {
+      font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+      font-size: 0.76rem;
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    .arch-scroll {
+      overflow: visible;
+      width: 100%;
+    }
+
+    .arch-map {
+      width: 100%;
+    }
+
+    .arch-map svg {
+      display: block;
+      height: auto;
+      width: 100%;
+    }
+
+    .arch-lane-label {
+      fill: var(--lc-ink);
+      font-family: "DM Sans", sans-serif;
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    .arch-lane-sub {
+      fill: var(--arch-ink-soft);
+      font-family: "DM Sans", sans-serif;
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .arch-node-title {
+      fill: var(--lc-ink);
+      font-family: "DM Sans", sans-serif;
+      font-size: 17px;
+      font-weight: 600;
+    }
+
+    .arch-node-copy {
+      fill: var(--arch-ink-soft);
+      font-family: "DM Sans", sans-serif;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .arch-node-tag {
+      fill: var(--lc-ink);
+      font-family: "DM Sans", sans-serif;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+
+    .arch-notes {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-top: 10px;
+    }
+
+    .arch-note {
+      background: rgba(255, 250, 246, 0.9);
+      border: 1px solid rgba(107, 80, 67, 0.12);
+      border-radius: 22px;
+      padding: 18px 18px 16px;
+    }
+
+    .arch-note h3 {
+      font-family: "Playfair Display", serif;
+      font-size: 1.2rem;
+      margin: 0 0 8px;
+    }
+
+    .arch-note p {
+      color: var(--arch-ink-soft);
+      margin: 0;
+    }
+
+    @media (max-width: 980px) {
+      .lc-main {
+        width: min(calc(100vw - 24px), 100%);
+      }
+
+      .arch-summary-grid,
+      .arch-notes {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 920px) {
+      .arch-card {
+        border-radius: 26px;
+        padding: 16px;
+      }
+
+      .arch-card__head {
+        align-items: start;
+        flex-direction: column;
+      }
+
+      .arch-badges {
+        justify-content: flex-start;
+      }
+    }
+  </style>
+{% endblock %}
+
+{% block hero %}
+  <section class="lc-hero lc-hero--diagram">
+    <div class="lc-hero__copy arch-meta">
+      <p class="lc-eyebrow">Agent SDK View</p>
+      <h1 class="lc-display">How LovelyChaos uses the Agent SDK, explained in plain English.</h1>
+      <p class="arch-kicker">
+        This is the simple version of the architecture page. The Agent SDK now does three big jobs: it pulls events out of messy
+        school updates, routes those events into the right outcome, and runs follow-up commands with tools. The app still provides
+        the real calendar, reminder, notification, storage, and audit code underneath those agent decisions.
+      </p>
+      <div class="arch-legend" aria-label="Diagram legend">
+        <span class="arch-chip"><span class="arch-chip__dot" style="background: var(--arch-input);"></span>Incoming info</span>
+        <span class="arch-chip"><span class="arch-chip__dot" style="background: var(--arch-rules);"></span>App rules</span>
+        <span class="arch-chip"><span class="arch-chip__dot" style="background: var(--arch-agent);"></span>Agent SDK</span>
+        <span class="arch-chip"><span class="arch-chip__dot" style="background: var(--arch-tool);"></span>Function tools</span>
+        <span class="arch-chip"><span class="arch-chip__dot" style="background: var(--arch-memory);"></span>Saved memory</span>
+        <span class="arch-chip"><span class="arch-chip__dot" style="background: var(--arch-result);"></span>Results</span>
+      </div>
+      <div class="arch-summary-grid">
+        <article class="arch-summary">
+          <p class="arch-summary__label">What it does</p>
+          <p>The Agent SDK now extracts event candidates, routes them, and can use tools to handle follow-up commands.</p>
+        </article>
+        <article class="arch-summary">
+          <p class="arch-summary__label">What the app still does</p>
+          <p>The app provides the real integrations: calendar writes, reminder scheduling, preference saves, notifications, storage, and audits.</p>
+        </article>
+        <article class="arch-summary">
+          <p class="arch-summary__label">Why context matters</p>
+          <p>Each run can see household context, saved conversation history, and thread documents, so replies do not start from scratch.</p>
+        </article>
+      </div>
+    </div>
+    <div class="lc-hero__aside">
+      <a class="lc-button" href="/architecture-diagrams">Open technical version</a>
+      <a class="lc-button lc-button--secondary" href="/admin/activity">Open activity view</a>
+    </div>
+  </section>
+{% endblock %}
+
+{% block page %}
+  <section class="arch-section" aria-label="Agent SDK architecture diagrams">
+    <article class="arch-card">
+      <div class="arch-card__head">
+        <div>
+          <p class="lc-eyebrow">Diagram 1</p>
+          <h2 class="lc-section-title">A school message comes in</h2>
+          <p class="arch-card__copy">
+            A school email or text reaches LovelyChaos first. The app saves it, opens any useful links or attachments, and then starts
+            an Agent SDK run. The agent first extracts the event candidates, then a second agent step routes each one into the right
+            outcome. Only after that do the app and summary flow finish the household update.
+          </p>
+        </div>
+        <div class="arch-badges">
+          <span class="arch-badge">School email or SMS</span>
+          <span class="arch-badge">Agent extraction</span>
+          <span class="arch-badge">Agent SDK routing</span>
+        </div>
+      </div>
+      <div class="arch-scroll">
+        <div class="arch-map">
+          <svg viewBox="0 0 1360 860" role="img" aria-labelledby="agentsdk-ingest-title agentsdk-ingest-desc">
+            <title id="agentsdk-ingest-title">LovelyChaos Agent SDK message intake</title>
+            <desc id="agentsdk-ingest-desc">Five-lane diagram showing message intake, app preparation, Agent SDK extraction, Agent SDK routing, and summary plus follow-through.</desc>
+
+            <defs>
+              <marker id="arch-arrowhead-sdk-1" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+                <path d="M0,0 L10,5 L0,10 z" fill="var(--arch-arrow)"></path>
+              </marker>
+              <filter id="arch-shadow-sdk" x="-20%" y="-20%" width="140%" height="140%">
+                <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="rgba(81,58,46,0.12)"></feDropShadow>
+              </filter>
+            </defs>
+
+            <rect x="0" y="0" width="1360" height="860" rx="30" fill="rgba(255,251,246,0.86)"></rect>
+
+            <g>
+              <rect x="24" y="24" width="228" height="812" rx="28" fill="rgba(255, 248, 236, 0.92)"></rect>
+              <rect x="284" y="24" width="228" height="812" rx="28" fill="var(--arch-lane-strong)"></rect>
+              <rect x="544" y="24" width="228" height="812" rx="28" fill="var(--arch-agent-lane)"></rect>
+              <rect x="804" y="24" width="228" height="812" rx="28" fill="var(--arch-agent-lane)"></rect>
+              <rect x="1064" y="24" width="272" height="812" rx="28" fill="rgba(236, 241, 252, 0.92)"></rect>
+            </g>
+
+            <g>
+              <text x="48" y="68" class="arch-lane-sub">Step 1</text>
+              <text x="48" y="98" class="arch-lane-label">Message arrives</text>
+              <text x="308" y="68" class="arch-lane-sub">Step 2</text>
+              <text x="308" y="98" class="arch-lane-label">App builds context</text>
+              <text x="568" y="68" class="arch-lane-sub">Step 3</text>
+              <text x="568" y="98" class="arch-lane-label">Agent extracts events</text>
+              <text x="828" y="68" class="arch-lane-sub">Step 4</text>
+              <text x="828" y="98" class="arch-lane-label">Agent SDK routes it</text>
+              <text x="1088" y="68" class="arch-lane-sub">Step 5</text>
+              <text x="1088" y="98" class="arch-lane-label">Finish and reply</text>
+            </g>
+
+            <g filter="url(#arch-shadow-sdk)">
+              <g>
+                <rect x="46" y="144" width="184" height="124" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(213,163,79,0.44)"></rect>
+                <rect x="64" y="162" width="96" height="22" rx="11" fill="rgba(213,163,79,0.18)"></rect>
+                <text x="78" y="177" class="arch-node-tag">Incoming info</text>
+                <text x="64" y="208" class="arch-node-title">School message</text>
+                <text x="64" y="232" class="arch-node-copy">An email, forwarded email,</text>
+                <text x="64" y="252" class="arch-node-copy">or text message comes in.</text>
+              </g>
+
+              <g>
+                <rect x="46" y="310" width="184" height="124" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(213,163,79,0.44)"></rect>
+                <rect x="64" y="328" width="84" height="22" rx="11" fill="rgba(213,163,79,0.18)"></rect>
+                <text x="78" y="343" class="arch-node-tag">Incoming info</text>
+                <text x="64" y="374" class="arch-node-title">Extra material</text>
+                <text x="64" y="398" class="arch-node-copy">Links, PDFs, and screenshots</text>
+                <text x="64" y="418" class="arch-node-copy">can come with it.</text>
+              </g>
+
+              <g>
+                <rect x="306" y="138" width="184" height="144" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="324" y="156" width="92" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="338" y="171" class="arch-node-tag">App rules</text>
+                <text x="324" y="202" class="arch-node-title">Save and clean</text>
+                <text x="324" y="226" class="arch-node-copy">The app verifies the source,</text>
+                <text x="324" y="246" class="arch-node-copy">stores the raw message,</text>
+                <text x="324" y="266" class="arch-node-copy">and removes obvious clutter.</text>
+              </g>
+
+              <g>
+                <rect x="306" y="330" width="184" height="164" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="324" y="348" width="92" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="338" y="363" class="arch-node-tag">App rules</text>
+                <text x="324" y="394" class="arch-node-title">Prepare context</text>
+                <text x="324" y="418" class="arch-node-copy">The app opens links, reads PDFs,</text>
+                <text x="324" y="438" class="arch-node-copy">loads household context, and</text>
+                <text x="324" y="458" class="arch-node-copy">bundles thread documents for</text>
+                <text x="324" y="478" class="arch-node-copy">the agent run.</text>
+              </g>
+
+              <g>
+                <rect x="566" y="154" width="184" height="164" rx="24" fill="var(--arch-agent-card)" stroke="var(--arch-agent-line)"></rect>
+                <rect x="584" y="172" width="86" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="604" y="187" class="arch-node-tag">Agent SDK</text>
+                <text x="584" y="218" class="arch-node-title">Find what matters</text>
+                <text x="584" y="242" class="arch-node-copy">The agent pulls out dates,</text>
+                <text x="584" y="262" class="arch-node-copy">events, deadlines, and topics</text>
+                <text x="584" y="282" class="arch-node-copy">from the cleaned-up content.</text>
+              </g>
+
+              <g>
+                <rect x="566" y="364" width="184" height="156" rx="24" fill="var(--arch-agent-card)" stroke="var(--arch-agent-line)"></rect>
+                <rect x="584" y="382" width="86" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="604" y="397" class="arch-node-tag">Agent SDK</text>
+                <text x="584" y="428" class="arch-node-title">Use rich context</text>
+                <text x="584" y="452" class="arch-node-copy">The run sees household context,</text>
+                <text x="584" y="472" class="arch-node-copy">saved session history, and</text>
+                <text x="584" y="492" class="arch-node-copy">thread documents together.</text>
+              </g>
+
+              <g>
+                <rect x="826" y="146" width="184" height="170" rx="24" fill="var(--arch-agent-card)" stroke="var(--arch-agent-line)"></rect>
+                <rect x="844" y="164" width="92" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="858" y="179" class="arch-node-tag">Agent SDK</text>
+                <text x="844" y="210" class="arch-node-title">Route each event</text>
+                <text x="844" y="234" class="arch-node-copy">The agent decides which items</text>
+                <text x="844" y="254" class="arch-node-copy">should be auto-added, kept for</text>
+                <text x="844" y="274" class="arch-node-copy">follow-up, stored as info,</text>
+                <text x="844" y="294" class="arch-node-copy">or ignored.</text>
+              </g>
+
+              <g>
+                <rect x="826" y="352" width="184" height="170" rx="24" fill="var(--arch-agent-card)" stroke="var(--arch-agent-line)"></rect>
+                <rect x="844" y="370" width="92" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="858" y="385" class="arch-node-tag">Agent SDK</text>
+                <text x="844" y="416" class="arch-node-title">Return a structured plan</text>
+                <text x="844" y="440" class="arch-node-copy">The agent sends back a clean</text>
+                <text x="844" y="460" class="arch-node-copy">machine-readable decision the</text>
+                <text x="844" y="480" class="arch-node-copy">app can carry out directly.</text>
+              </g>
+
+              <g>
+                <rect x="1086" y="142" width="228" height="136" rx="24" fill="rgba(244, 248, 255, 0.98)" stroke="rgba(86,113,166,0.34)"></rect>
+                <rect x="1104" y="160" width="76" height="22" rx="11" fill="rgba(86,113,166,0.12)"></rect>
+                <text x="1124" y="175" class="arch-node-tag">Results</text>
+                <text x="1104" y="206" class="arch-node-title">Final recap is written</text>
+                <text x="1104" y="230" class="arch-node-copy">The final family recap is built</text>
+                <text x="1104" y="250" class="arch-node-copy">from the routed outcomes.</text>
+              </g>
+
+              <g>
+                <rect x="1086" y="320" width="228" height="152" rx="24" fill="rgba(244, 248, 255, 0.98)" stroke="rgba(86,113,166,0.34)"></rect>
+                <rect x="1104" y="338" width="76" height="22" rx="11" fill="rgba(86,113,166,0.12)"></rect>
+                <text x="1124" y="353" class="arch-node-tag">Results</text>
+                <text x="1104" y="384" class="arch-node-title">App carries it out</text>
+                <text x="1104" y="408" class="arch-node-copy">The app turns the agent's route</text>
+                <text x="1104" y="428" class="arch-node-copy">into the real recap, calendar</text>
+                <text x="1104" y="448" class="arch-node-copy">update, or no-op.</text>
+              </g>
+
+              <g>
+                <rect x="1086" y="514" width="228" height="152" rx="24" fill="rgba(247, 241, 236, 0.96)" stroke="rgba(140,108,85,0.3)"></rect>
+                <rect x="1104" y="532" width="98" height="22" rx="11" fill="rgba(140,108,85,0.12)"></rect>
+                <text x="1124" y="547" class="arch-node-tag">Saved memory</text>
+                <text x="1104" y="578" class="arch-node-title">Memory stays ready</text>
+                <text x="1104" y="602" class="arch-node-copy">The recap, snippets, and audit</text>
+                <text x="1104" y="622" class="arch-node-copy">trail are saved for later</text>
+                <text x="1104" y="642" class="arch-node-copy">follow-up messages.</text>
+              </g>
+            </g>
+
+            <g stroke="var(--arch-arrow)" stroke-width="3" fill="none" marker-end="url(#arch-arrowhead-sdk-1)">
+              <path d="M230 206 C264 206 272 206 306 206"></path>
+              <path d="M230 372 C264 372 272 372 306 372"></path>
+              <path d="M398 282 L398 330"></path>
+              <path d="M490 236 C522 236 534 236 566 236"></path>
+              <path d="M490 410 C522 410 534 410 566 410"></path>
+              <path d="M658 318 L658 364"></path>
+              <path d="M750 236 C784 236 792 236 826 236"></path>
+              <path d="M750 442 C784 442 792 442 826 442"></path>
+              <path d="M918 316 L918 352"></path>
+              <path d="M1010 210 C1044 210 1052 210 1086 210"></path>
+              <path d="M1010 430 C1044 430 1052 430 1086 430"></path>
+            </g>
+
+            <g stroke="var(--arch-arrow)" stroke-width="2.5" fill="none" stroke-dasharray="8 8" marker-end="url(#arch-arrowhead-sdk-1)">
+              <path d="M1210 666 C1210 718 920 760 610 760"></path>
+            </g>
+
+            <text x="566" y="790" class="arch-node-copy">Simple rule: the agent suggests what the message means; the app decides what is safe to do next.</text>
+          </svg>
+        </div>
+      </div>
+    </article>
+
+    <article class="arch-card">
+      <div class="arch-card__head">
+        <div>
+          <p class="lc-eyebrow">Diagram 2</p>
+          <h2 class="lc-section-title">A parent replies later</h2>
+          <p class="arch-card__copy">
+            When a parent replies with something short like "add that one" or "tell me more," LovelyChaos does not start from zero.
+            The app loads the saved conversation and documents for that family thread, then the Agent SDK first figures out what the
+            parent means. After that, a tool-using agent step can search the calendar, add or update events, set reminders, or change
+            preferences using the app's real integrations.
+          </p>
+        </div>
+        <div class="arch-badges">
+          <span class="arch-badge">Interpret request</span>
+          <span class="arch-badge">Conversation memory</span>
+          <span class="arch-badge">Function tools</span>
+        </div>
+      </div>
+      <div class="arch-scroll">
+        <div class="arch-map">
+          <svg viewBox="0 0 1360 900" role="img" aria-labelledby="agentsdk-reply-title agentsdk-reply-desc">
+            <title id="agentsdk-reply-title">LovelyChaos Agent SDK follow-up flow</title>
+            <desc id="agentsdk-reply-desc">Five-lane diagram showing parent replies, memory loading, Agent SDK understanding, Agent SDK tool use, and reply plus memory updates.</desc>
+
+            <defs>
+              <marker id="arch-arrowhead-sdk-2" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+                <path d="M0,0 L10,5 L0,10 z" fill="var(--arch-arrow)"></path>
+              </marker>
+              <filter id="arch-shadow-sdk-2" x="-20%" y="-20%" width="140%" height="140%">
+                <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="rgba(81,58,46,0.12)"></feDropShadow>
+              </filter>
+            </defs>
+
+            <rect x="0" y="0" width="1360" height="900" rx="30" fill="rgba(255,251,246,0.86)"></rect>
+
+            <g>
+              <rect x="24" y="24" width="228" height="852" rx="28" fill="rgba(255, 248, 236, 0.92)"></rect>
+              <rect x="284" y="24" width="228" height="852" rx="28" fill="rgba(247, 241, 236, 0.96)"></rect>
+              <rect x="544" y="24" width="228" height="852" rx="28" fill="var(--arch-agent-lane)"></rect>
+              <rect x="804" y="24" width="228" height="852" rx="28" fill="var(--arch-agent-lane)"></rect>
+              <rect x="1064" y="24" width="272" height="852" rx="28" fill="rgba(244, 248, 255, 0.98)"></rect>
+            </g>
+
+            <g>
+              <text x="48" y="68" class="arch-lane-sub">Step 1</text>
+              <text x="48" y="98" class="arch-lane-label">Parent replies</text>
+              <text x="308" y="68" class="arch-lane-sub">Step 2</text>
+              <text x="308" y="98" class="arch-lane-label">Memory is loaded</text>
+              <text x="568" y="68" class="arch-lane-sub">Step 3</text>
+              <text x="568" y="98" class="arch-lane-label">Agent understands</text>
+              <text x="828" y="68" class="arch-lane-sub">Step 4</text>
+              <text x="828" y="98" class="arch-lane-label">Agent calls tools</text>
+              <text x="1088" y="68" class="arch-lane-sub">Step 5</text>
+              <text x="1088" y="98" class="arch-lane-label">Reply and memory</text>
+            </g>
+
+            <g filter="url(#arch-shadow-sdk-2)">
+              <g>
+                <rect x="46" y="146" width="184" height="136" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(213,163,79,0.44)"></rect>
+                <rect x="64" y="164" width="96" height="22" rx="11" fill="rgba(213,163,79,0.18)"></rect>
+                <text x="78" y="179" class="arch-node-tag">Incoming info</text>
+                <text x="64" y="210" class="arch-node-title">Short reply</text>
+                <text x="64" y="234" class="arch-node-copy">A parent replies by email</text>
+                <text x="64" y="254" class="arch-node-copy">or text with a natural</text>
+                <text x="64" y="274" class="arch-node-copy">message like "add that one."</text>
+              </g>
+
+              <g>
+                <rect x="46" y="324" width="184" height="124" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(213,163,79,0.44)"></rect>
+                <rect x="64" y="342" width="96" height="22" rx="11" fill="rgba(213,163,79,0.18)"></rect>
+                <text x="78" y="357" class="arch-node-tag">Incoming info</text>
+                <text x="64" y="388" class="arch-node-title">Possible ambiguity</text>
+                <text x="64" y="412" class="arch-node-copy">Replies can be short, vague,</text>
+                <text x="64" y="432" class="arch-node-copy">or refer to an earlier recap.</text>
+              </g>
+
+              <g>
+                <rect x="306" y="138" width="184" height="158" rx="24" fill="rgba(247, 241, 236, 0.96)" stroke="rgba(140,108,85,0.3)"></rect>
+                <rect x="324" y="156" width="98" height="22" rx="11" fill="rgba(140,108,85,0.12)"></rect>
+                <text x="344" y="171" class="arch-node-tag">Saved memory</text>
+                <text x="324" y="202" class="arch-node-title">Load the thread</text>
+                <text x="324" y="226" class="arch-node-copy">The app finds the right family</text>
+                <text x="324" y="246" class="arch-node-copy">conversation, the last recap,</text>
+                <text x="324" y="266" class="arch-node-copy">and any saved documents.</text>
+              </g>
+
+              <g>
+                <rect x="306" y="338" width="184" height="150" rx="24" fill="rgba(247, 241, 236, 0.96)" stroke="rgba(140,108,85,0.3)"></rect>
+                <rect x="324" y="356" width="98" height="22" rx="11" fill="rgba(140,108,85,0.12)"></rect>
+                <text x="344" y="371" class="arch-node-tag">Saved memory</text>
+                <text x="324" y="402" class="arch-node-title">Bring back context</text>
+                <text x="324" y="426" class="arch-node-copy">That memory gives meaning</text>
+                <text x="324" y="446" class="arch-node-copy">to words like "this," "that,"</text>
+                <text x="324" y="466" class="arch-node-copy">or "the swim one."</text>
+              </g>
+
+              <g>
+                <rect x="566" y="154" width="184" height="168" rx="24" fill="var(--arch-agent-card)" stroke="var(--arch-agent-line)"></rect>
+                <rect x="584" y="172" width="86" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="604" y="187" class="arch-node-tag">Agent SDK</text>
+                <text x="584" y="218" class="arch-node-title">Figure out the ask</text>
+                <text x="584" y="242" class="arch-node-copy">The agent decides whether the</text>
+                <text x="584" y="262" class="arch-node-copy">parent wants more detail,</text>
+                <text x="584" y="282" class="arch-node-copy">a calendar add, a reminder,</text>
+                <text x="584" y="302" class="arch-node-copy">or something else.</text>
+              </g>
+
+              <g>
+                <rect x="566" y="362" width="184" height="150" rx="24" fill="var(--arch-agent-card)" stroke="var(--arch-agent-line)"></rect>
+                <rect x="584" y="380" width="86" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="604" y="395" class="arch-node-tag">Agent SDK</text>
+                <text x="584" y="426" class="arch-node-title">Execute or clarify</text>
+                <text x="584" y="450" class="arch-node-copy">If the reply is clear enough,</text>
+                <text x="584" y="470" class="arch-node-copy">move to tools. If not, prepare</text>
+                <text x="584" y="490" class="arch-node-copy">a clarifying question.</text>
+              </g>
+
+              <g>
+                <rect x="826" y="146" width="184" height="176" rx="24" fill="var(--arch-agent-card)" stroke="var(--arch-agent-line)"></rect>
+                <rect x="844" y="164" width="92" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="858" y="179" class="arch-node-tag">Agent SDK</text>
+                <text x="844" y="210" class="arch-node-title">Choose a function tool</text>
+                <text x="844" y="234" class="arch-node-copy">The agent decides whether to</text>
+                <text x="844" y="254" class="arch-node-copy">read or update preferences,</text>
+                <text x="844" y="274" class="arch-node-copy">search events, add from context,</text>
+                <text x="844" y="294" class="arch-node-copy">or run a calendar mutation.</text>
+              </g>
+
+              <g>
+                <rect x="826" y="356" width="184" height="176" rx="24" fill="var(--arch-tool-card)" stroke="var(--arch-tool-line)"></rect>
+                <rect x="844" y="374" width="104" height="22" rx="11" fill="rgba(78,107,150,0.14)"></rect>
+                <text x="858" y="389" class="arch-node-tag">Function tools</text>
+                <text x="844" y="420" class="arch-node-title">Run app-backed tools</text>
+                <text x="844" y="444" class="arch-node-copy">The tools hit follow-up memory,</text>
+                <text x="844" y="464" class="arch-node-copy">local events, Google Calendar,</text>
+                <text x="844" y="484" class="arch-node-copy">reminders, and saved preferences.</text>
+              </g>
+
+              <g>
+                <rect x="1086" y="140" width="228" height="148" rx="24" fill="rgba(244, 248, 255, 0.98)" stroke="rgba(86,113,166,0.34)"></rect>
+                <rect x="1104" y="158" width="76" height="22" rx="11" fill="rgba(86,113,166,0.12)"></rect>
+                <text x="1124" y="173" class="arch-node-tag">Results</text>
+                <text x="1104" y="204" class="arch-node-title">Clear reply back</text>
+                <text x="1104" y="228" class="arch-node-copy">The parent gets a plain answer:</text>
+                <text x="1104" y="248" class="arch-node-copy">confirmation, extra detail, or</text>
+                <text x="1104" y="268" class="arch-node-copy">a clarifying question.</text>
+              </g>
+
+              <g>
+                <rect x="1086" y="328" width="228" height="156" rx="24" fill="rgba(244, 248, 255, 0.98)" stroke="rgba(86,113,166,0.34)"></rect>
+                <rect x="1104" y="346" width="76" height="22" rx="11" fill="rgba(86,113,166,0.12)"></rect>
+                <text x="1124" y="361" class="arch-node-tag">Results</text>
+                <text x="1104" y="392" class="arch-node-title">Outcome is recorded</text>
+                <text x="1104" y="416" class="arch-node-copy">The result, tool outcome, and</text>
+                <text x="1104" y="436" class="arch-node-copy">reply channel are written back</text>
+                <text x="1104" y="456" class="arch-node-copy">for traceability.</text>
+              </g>
+
+              <g>
+                <rect x="1086" y="524" width="228" height="162" rx="24" fill="rgba(247, 241, 236, 0.96)" stroke="rgba(140,108,85,0.3)"></rect>
+                <rect x="1104" y="542" width="98" height="22" rx="11" fill="rgba(140,108,85,0.12)"></rect>
+                <text x="1124" y="557" class="arch-node-tag">Saved memory</text>
+                <text x="1104" y="588" class="arch-node-title">Conversation stays current</text>
+                <text x="1104" y="612" class="arch-node-copy">The new reply and outcome are</text>
+                <text x="1104" y="632" class="arch-node-copy">saved, so the next follow-up</text>
+                <text x="1104" y="652" class="arch-node-copy">starts with fresh context.</text>
+              </g>
+            </g>
+
+            <g stroke="var(--arch-arrow)" stroke-width="3" fill="none" marker-end="url(#arch-arrowhead-sdk-2)">
+              <path d="M230 214 C264 214 272 214 306 214"></path>
+              <path d="M230 386 C264 386 272 386 306 386"></path>
+              <path d="M398 296 L398 338"></path>
+              <path d="M490 226 C522 226 534 226 566 226"></path>
+              <path d="M490 414 C522 414 534 414 566 414"></path>
+              <path d="M658 322 L658 362"></path>
+              <path d="M750 238 C784 238 792 238 826 238"></path>
+              <path d="M750 436 C784 436 792 436 826 436"></path>
+              <path d="M918 322 L918 356"></path>
+              <path d="M1010 214 C1044 214 1052 214 1086 214"></path>
+              <path d="M1010 432 C1044 432 1052 432 1086 432"></path>
+            </g>
+
+            <g stroke="var(--arch-arrow)" stroke-width="2.5" fill="none" stroke-dasharray="8 8" marker-end="url(#arch-arrowhead-sdk-2)">
+              <path d="M1200 686 C1200 748 920 792 396 792"></path>
+            </g>
+
+            <text x="360" y="822" class="arch-node-copy">Because LovelyChaos keeps conversation memory, short follow-ups can still make sense without the parent repeating the whole story.</text>
+          </svg>
+        </div>
+      </div>
+    </article>
+
+    <article class="arch-card">
+      <div class="arch-card__head">
+        <div>
+          <p class="lc-eyebrow">Diagram 3</p>
+          <h2 class="lc-section-title">When function tools are used</h2>
+          <p class="arch-card__copy">
+            Function tools are not used when a school update first comes in. They start only after a later follow-up email or SMS is
+            understood as a supported command. At that point the app builds a safe runtime, the Agent SDK picks the right tool path,
+            and the tool runs the real app code for preferences, calendar lookups, adds, updates, deletes, or reminders.
+          </p>
+        </div>
+        <div class="arch-badges">
+          <span class="arch-badge"><code>execute_command_with_tools()</code></span>
+          <span class="arch-badge"><code>CommandToolRuntime</code></span>
+          <span class="arch-badge"><code>@function_tool</code></span>
+        </div>
+      </div>
+      <div class="arch-scroll">
+        <div class="arch-map">
+          <svg viewBox="0 0 1360 860" role="img" aria-labelledby="agentsdk-tools-title agentsdk-tools-desc">
+            <title id="agentsdk-tools-title">LovelyChaos function tool timing</title>
+            <desc id="agentsdk-tools-desc">Five-lane diagram showing when function tools are used, how the runtime is built, what tool families exist, and where results go.</desc>
+
+            <defs>
+              <marker id="arch-arrowhead-sdk-3" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+                <path d="M0,0 L10,5 L0,10 z" fill="var(--arch-arrow)"></path>
+              </marker>
+              <filter id="arch-shadow-sdk-3" x="-20%" y="-20%" width="140%" height="140%">
+                <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="rgba(81,58,46,0.12)"></feDropShadow>
+              </filter>
+            </defs>
+
+            <rect x="0" y="0" width="1360" height="860" rx="30" fill="rgba(255,251,246,0.86)"></rect>
+
+            <g>
+              <rect x="24" y="24" width="228" height="812" rx="28" fill="rgba(255, 248, 236, 0.92)"></rect>
+              <rect x="284" y="24" width="228" height="812" rx="28" fill="var(--arch-lane-strong)"></rect>
+              <rect x="544" y="24" width="228" height="812" rx="28" fill="var(--arch-agent-lane)"></rect>
+              <rect x="804" y="24" width="228" height="812" rx="28" fill="var(--arch-tool-lane)"></rect>
+              <rect x="1064" y="24" width="272" height="812" rx="28" fill="rgba(244, 248, 255, 0.98)"></rect>
+            </g>
+
+            <g>
+              <text x="48" y="68" class="arch-lane-sub">Step 1</text>
+              <text x="48" y="98" class="arch-lane-label">Trigger</text>
+              <text x="308" y="68" class="arch-lane-sub">Step 2</text>
+              <text x="308" y="98" class="arch-lane-label">Runtime setup</text>
+              <text x="568" y="68" class="arch-lane-sub">Step 3</text>
+              <text x="568" y="98" class="arch-lane-label">Agent decides</text>
+              <text x="828" y="68" class="arch-lane-sub">Step 4</text>
+              <text x="828" y="98" class="arch-lane-label">Function tools run</text>
+              <text x="1088" y="68" class="arch-lane-sub">Step 5</text>
+              <text x="1088" y="98" class="arch-lane-label">Result comes back</text>
+            </g>
+
+            <g filter="url(#arch-shadow-sdk-3)">
+              <g>
+                <rect x="46" y="144" width="184" height="138" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(213,163,79,0.44)"></rect>
+                <rect x="64" y="162" width="96" height="22" rx="11" fill="rgba(213,163,79,0.18)"></rect>
+                <text x="78" y="177" class="arch-node-tag">Trigger</text>
+                <text x="64" y="208" class="arch-node-title">Initial intake</text>
+                <text x="64" y="232" class="arch-node-copy">Newsletter ingestion, event</text>
+                <text x="64" y="252" class="arch-node-copy">extraction, routing, and recap</text>
+                <text x="64" y="272" class="arch-node-copy">do not use function tools.</text>
+              </g>
+
+              <g>
+                <rect x="46" y="332" width="184" height="154" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(213,163,79,0.44)"></rect>
+                <rect x="64" y="350" width="96" height="22" rx="11" fill="rgba(213,163,79,0.18)"></rect>
+                <text x="78" y="365" class="arch-node-tag">Trigger</text>
+                <text x="64" y="396" class="arch-node-title">Follow-up command</text>
+                <text x="64" y="420" class="arch-node-copy">Tools start only after a reply</text>
+                <text x="64" y="440" class="arch-node-copy">is understood as add, update,</text>
+                <text x="64" y="460" class="arch-node-copy">delete, remind, more_info,</text>
+                <text x="64" y="480" class="arch-node-copy">or set_preference.</text>
+              </g>
+
+              <g>
+                <rect x="306" y="160" width="184" height="164" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="324" y="178" width="92" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="338" y="193" class="arch-node-tag">App rules</text>
+                <text x="324" y="224" class="arch-node-title">Build tool runtime</text>
+                <text x="324" y="248" class="arch-node-copy">The app prepares the safe tool</text>
+                <text x="324" y="268" class="arch-node-copy">context with family, timezone,</text>
+                <text x="324" y="288" class="arch-node-copy">message details, and the app</text>
+                <text x="324" y="308" class="arch-node-copy">functions the tools may call.</text>
+              </g>
+
+              <g>
+                <rect x="306" y="368" width="184" height="150" rx="24" fill="var(--arch-paper-strong)" stroke="rgba(242,111,85,0.36)"></rect>
+                <rect x="324" y="386" width="92" height="22" rx="11" fill="rgba(242,111,85,0.16)"></rect>
+                <text x="338" y="401" class="arch-node-tag">App rules</text>
+                <text x="324" y="432" class="arch-node-title">Enable what is safe</text>
+                <text x="324" y="456" class="arch-node-copy">Calendar tools are enabled only</text>
+                <text x="324" y="476" class="arch-node-copy">when the backing runtime and</text>
+                <text x="324" y="496" class="arch-node-copy">calendar functions are present.</text>
+              </g>
+
+              <g>
+                <rect x="566" y="154" width="184" height="164" rx="24" fill="var(--arch-agent-card)" stroke="var(--arch-agent-line)"></rect>
+                <rect x="584" y="172" width="86" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="604" y="187" class="arch-node-tag">Agent SDK</text>
+                <text x="584" y="218" class="arch-node-title">Run command agent</text>
+                <text x="584" y="242" class="arch-node-copy">The Agent SDK receives the</text>
+                <text x="584" y="262" class="arch-node-copy">parsed request, the current</text>
+                <text x="584" y="282" class="arch-node-copy">message, and the saved thread</text>
+                <text x="584" y="302" class="arch-node-copy">context for this family.</text>
+              </g>
+
+              <g>
+                <rect x="566" y="364" width="184" height="152" rx="24" fill="var(--arch-agent-card)" stroke="var(--arch-agent-line)"></rect>
+                <rect x="584" y="382" width="86" height="22" rx="11" fill="rgba(45,125,115,0.14)"></rect>
+                <text x="604" y="397" class="arch-node-tag">Agent SDK</text>
+                <text x="584" y="428" class="arch-node-title">Pick a tool path</text>
+                <text x="584" y="452" class="arch-node-copy">The agent chooses whether this</text>
+                <text x="584" y="472" class="arch-node-copy">is a preference read or write,</text>
+                <text x="584" y="492" class="arch-node-copy">an event lookup, or a mutation.</text>
+              </g>
+
+              <g>
+                <rect x="826" y="124" width="184" height="152" rx="24" fill="var(--arch-tool-card)" stroke="var(--arch-tool-line)"></rect>
+                <rect x="844" y="142" width="104" height="22" rx="11" fill="rgba(78,107,150,0.14)"></rect>
+                <text x="858" y="157" class="arch-node-tag">Function tools</text>
+                <text x="844" y="188" class="arch-node-title">Preference tools</text>
+                <text x="844" y="212" class="arch-node-copy">Read the family's saved rules</text>
+                <text x="844" y="232" class="arch-node-copy">or update them for how future</text>
+                <text x="844" y="252" class="arch-node-copy">school messages should be handled.</text>
+              </g>
+
+              <g>
+                <rect x="826" y="314" width="184" height="176" rx="24" fill="var(--arch-tool-card)" stroke="var(--arch-tool-line)"></rect>
+                <rect x="844" y="332" width="104" height="22" rx="11" fill="rgba(78,107,150,0.14)"></rect>
+                <text x="858" y="347" class="arch-node-tag">Function tools</text>
+                <text x="844" y="378" class="arch-node-title">Lookup and add tools</text>
+                <text x="844" y="402" class="arch-node-copy">Search the recent thread and</text>
+                <text x="844" y="422" class="arch-node-copy">calendar to find the right event,</text>
+                <text x="844" y="442" class="arch-node-copy">or add it directly from the saved</text>
+                <text x="844" y="462" class="arch-node-copy">follow-up context.</text>
+              </g>
+
+              <g>
+                <rect x="826" y="530" width="184" height="176" rx="24" fill="var(--arch-tool-card)" stroke="var(--arch-tool-line)"></rect>
+                <rect x="844" y="548" width="104" height="22" rx="11" fill="rgba(78,107,150,0.14)"></rect>
+                <text x="858" y="563" class="arch-node-tag">Function tools</text>
+                <text x="844" y="594" class="arch-node-title">Mutation tools</text>
+                <text x="844" y="618" class="arch-node-copy">Update an event, delete one,</text>
+                <text x="844" y="638" class="arch-node-copy">or set a reminder using the</text>
+                <text x="844" y="658" class="arch-node-copy">real calendar and reminder</text>
+                <text x="844" y="678" class="arch-node-copy">integrations behind the app.</text>
+              </g>
+
+              <g>
+                <rect x="1086" y="156" width="228" height="160" rx="24" fill="rgba(244, 248, 255, 0.98)" stroke="rgba(86,113,166,0.34)"></rect>
+                <rect x="1104" y="174" width="76" height="22" rx="11" fill="rgba(86,113,166,0.12)"></rect>
+                <text x="1124" y="189" class="arch-node-tag">Results</text>
+                <text x="1104" y="220" class="arch-node-title">Real app code runs</text>
+                <text x="1104" y="244" class="arch-node-copy">The runtime functions hit DB</text>
+                <text x="1104" y="264" class="arch-node-copy">state, follow-up context,</text>
+                <text x="1104" y="284" class="arch-node-copy">Google Calendar, reminders,</text>
+                <text x="1104" y="304" class="arch-node-copy">and preferences.</text>
+              </g>
+
+              <g>
+                <rect x="1086" y="384" width="228" height="168" rx="24" fill="rgba(244, 248, 255, 0.98)" stroke="rgba(86,113,166,0.34)"></rect>
+                <rect x="1104" y="402" width="76" height="22" rx="11" fill="rgba(86,113,166,0.12)"></rect>
+                <text x="1124" y="417" class="arch-node-tag">Results</text>
+                <text x="1104" y="448" class="arch-node-title">Reply and status</text>
+                <text x="1104" y="472" class="arch-node-copy">The tool result comes back to</text>
+                <text x="1104" y="492" class="arch-node-copy">the agent, then the app sends</text>
+                <text x="1104" y="512" class="arch-node-copy">a reply or clarification and</text>
+                <text x="1104" y="532" class="arch-node-copy">records the mutation outcome.</text>
+              </g>
+            </g>
+
+            <g stroke="var(--arch-arrow)" stroke-width="3" fill="none" marker-end="url(#arch-arrowhead-sdk-3)">
+              <path d="M230 410 C264 410 272 410 306 410"></path>
+              <path d="M398 324 L398 368"></path>
+              <path d="M490 236 C522 236 534 236 566 236"></path>
+              <path d="M490 444 C522 444 534 444 566 444"></path>
+              <path d="M750 236 C784 236 792 236 826 236"></path>
+              <path d="M750 442 C784 442 792 442 826 442"></path>
+              <path d="M918 276 L918 314"></path>
+              <path d="M918 490 L918 530"></path>
+              <path d="M1010 236 C1044 236 1052 236 1086 236"></path>
+              <path d="M1010 470 C1044 470 1052 470 1086 470"></path>
+            </g>
+
+            <g stroke="var(--arch-arrow)" stroke-width="2.5" fill="none" stroke-dasharray="8 8" marker-end="url(#arch-arrowhead-sdk-3)">
+              <path d="M230 214 C500 214 690 110 1110 110"></path>
+            </g>
+
+            <text x="820" y="108" class="arch-node-copy">Initial intake stays on extraction, routing, and summary agents. Function tools only begin on follow-up commands.</text>
+          </svg>
+        </div>
+      </div>
+    </article>
+
+    <div class="arch-notes">
+      <article class="arch-note">
+        <h3>The simplest mental model</h3>
+        <p>LovelyChaos now uses separate Agent SDK passes for extraction, routing, and tool-backed follow-up execution. The app supplies the real integrations underneath them.</p>
+      </article>
+      <article class="arch-note">
+        <h3>Why memory matters</h3>
+        <p>Each run can include household context, recent session history, the message thread, and supporting documents, so later replies do not have to start from scratch.</p>
+      </article>
+      <article class="arch-note">
+        <h3>Why tracing matters</h3>
+        <p>Each important workflow and tool run can be traced, which makes it easier for the team to inspect what happened when a result looks wrong or surprising.</p>
+      </article>
+    </div>
+  </section>
+{% endblock %}

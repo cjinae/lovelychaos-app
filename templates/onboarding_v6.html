@@ -1,0 +1,457 @@
+{% extends "base.html" %}
+
+{% block title %}LovelyChaos Setup{% endblock %}
+
+{% block extra_head %}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* ── Terracotta Magazine: rich warm tones, Libre Baskerville, editorial layout ── */
+  :root {
+    --lc-bg: #faf6f0;
+    --lc-surface: #ffffff;
+    --lc-ink: #1e1208;
+    --lc-ink-soft: #7a6050;
+    --lc-accent: #c44f1e;
+    --lc-accent-soft: #fdf0ea;
+    --lc-line: #e8ddd4;
+    --lc-line-strong: #d8cec4;
+    --lc-shadow-soft: 0 20px 56px rgba(30,18,8,0.09);
+    --lc-shadow-card: 0 6px 20px rgba(30,18,8,0.06);
+    --lc-radius-sm: 4px;
+    --lc-radius-md: 16px;
+    --lc-radius-lg: 24px;
+    --lc-font-serif: 'Libre Baskerville', Georgia, serif;
+    --lc-font-sans: 'DM Sans', system-ui, sans-serif;
+  }
+
+  body { background: #faf6f0; }
+
+  .lc-orb--one { background: rgba(196,79,30,0.09); }
+  .lc-orb--two { background: rgba(210,190,165,0.25); }
+
+  .lc-sitebar {
+    background: rgba(250,246,240,0.9);
+    border-bottom-color: rgba(220,205,188,0.6);
+  }
+  .lc-brand::before { background: var(--lc-accent); box-shadow: 0 0 0 5px rgba(196,79,30,0.14); }
+  .lc-nav__link:hover, .lc-nav__link.is-active { background: var(--lc-accent-soft); color: var(--lc-accent); }
+
+  /* Typography — Libre Baskerville is more editorial than Playfair */
+  .lc-display {
+    font-family: 'Libre Baskerville', Georgia, serif;
+    font-size: clamp(40px, 7vw, 72px);
+    font-weight: 700;
+    line-height: 0.96;
+    letter-spacing: -0.02em;
+  }
+  .lc-section-title {
+    font-family: 'Libre Baskerville', Georgia, serif;
+    font-size: clamp(26px, 3.5vw, 36px);
+    font-weight: 700;
+    line-height: 1.05;
+  }
+  .lc-lead { font-family: 'DM Sans', sans-serif; font-size: clamp(16px, 1.8vw, 20px); font-weight: 300; }
+  .lc-intro { font-weight: 300; }
+
+  /* Hero */
+  .lc-hero {
+    background: linear-gradient(140deg, rgba(255,255,255,0.92), rgba(252,244,236,0.98));
+    border-color: rgba(220,205,188,0.7);
+  }
+
+  /* Buttons */
+  .lc-button {
+    background: var(--lc-accent);
+    color: #ffffff;
+    border-radius: 999px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: none;
+  }
+  .lc-button:hover { opacity: 0.88; transform: translateY(-1px); }
+  .lc-button--secondary { background: transparent; color: var(--lc-ink); border-color: rgba(180,150,130,0.35); }
+
+  /* Cards */
+  .lc-card, .lc-stat { background: rgba(255,255,255,0.85); border-color: rgba(220,205,188,0.65); }
+  .lc-card--tint { background: linear-gradient(160deg, rgba(255,255,255,0.96), rgba(252,244,236,0.97)); }
+
+  /* Inputs */
+  .lc-input, .lc-textarea { border-color: rgba(190,170,150,0.45); border-radius: 12px; background: rgba(255,255,255,0.9); }
+  .lc-input[readonly] { background: rgba(248,242,234,0.7); }
+  .lc-input:focus, .lc-textarea:focus { border-color: var(--lc-accent); box-shadow: 0 0 0 3px rgba(196,79,30,0.1); }
+
+  /* Checks */
+  .lc-check { border-color: rgba(220,205,188,0.65); border-radius: 14px; background: rgba(255,255,255,0.7); }
+  .lc-check input { accent-color: var(--lc-accent); }
+
+  /* Notes */
+  .lc-note { background: rgba(252,244,236,0.8); border-radius: 12px; color: var(--lc-ink-soft); }
+  .lc-note strong { color: var(--lc-ink); }
+
+  /* Pills */
+  .lc-pill { background: rgba(255,255,255,0.75); border-color: rgba(220,205,188,0.65); color: var(--lc-ink-soft); }
+  .lc-pill--secondary { background: rgba(252,244,236,0.6); border-color: rgba(210,190,165,0.5); }
+
+  /* List */
+  .lc-list-item { border-color: rgba(220,205,188,0.55); background: rgba(255,255,255,0.65); }
+  .lc-empty { border-color: rgba(210,190,165,0.45); background: rgba(255,255,255,0.5); }
+
+  .school-suggestions { background: rgba(255,255,255,0.98); border-color: rgba(210,190,165,0.7); border-radius: 14px; }
+  .school-suggestion:hover { background: var(--lc-accent-soft); }
+
+  /* ── V6 magazine layout — decorative chapter numbers ── */
+  .v6-chapter {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .v6-chapter__num {
+    font-family: 'Libre Baskerville', Georgia, serif;
+    font-size: 13px;
+    font-weight: 700;
+    font-style: italic;
+    color: var(--lc-accent);
+  }
+  .v6-chapter__rule {
+    flex: 1;
+    height: 1px;
+    background: var(--lc-line);
+    max-width: 32px;
+  }
+  .v6-chapter__name {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--lc-ink-soft);
+  }
+
+  /* V6 intro spread — two column full-bleed editorial header */
+  .v6-spread {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    margin-bottom: 32px;
+    border: 1px solid rgba(220,205,188,0.65);
+    border-radius: var(--lc-radius-lg);
+    overflow: hidden;
+    box-shadow: var(--lc-shadow-soft);
+  }
+  .v6-spread__left {
+    padding: 40px 44px;
+    background: var(--lc-ink);
+    color: #faf6f0;
+    display: grid;
+    gap: 18px;
+    align-content: center;
+  }
+  .v6-spread__left .lc-eyebrow { color: var(--lc-accent); }
+  .v6-spread__left .lc-display { color: #faf6f0; }
+  .v6-spread__left .lc-lead { color: rgba(250,246,240,0.65); font-size: clamp(15px, 1.6vw, 18px); }
+  .v6-spread__right {
+    padding: 40px 36px;
+    background: linear-gradient(140deg, rgba(255,255,255,0.96), rgba(252,244,236,0.98));
+    display: grid;
+    align-content: center;
+    gap: 14px;
+  }
+  .v6-spread__right-title {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--lc-ink-soft);
+    margin: 0;
+  }
+  .v6-spread__steps {
+    display: grid;
+    gap: 10px;
+  }
+  .v6-spread__step {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .v6-spread__n {
+    font-family: 'Libre Baskerville', Georgia, serif;
+    font-size: 18px;
+    font-weight: 700;
+    font-style: italic;
+    color: var(--lc-accent);
+    width: 24px;
+    flex-shrink: 0;
+  }
+  .v6-spread__s {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--lc-ink);
+  }
+  .v6-spread__d {
+    font-size: 12px;
+    color: var(--lc-ink-soft);
+    line-height: 1.4;
+  }
+  @media (max-width: 820px) {
+    .v6-spread { grid-template-columns: 1fr; }
+  }
+</style>
+{% endblock %}
+
+{% block hero %}{% endblock %}
+
+{% block page %}
+  <!-- V6: editorial spread replaces standard hero -->
+  <div class="v6-spread">
+    <div class="v6-spread__left">
+      <p class="lc-eyebrow">Family Setup</p>
+      <h1 class="lc-display">A calmer start for a busy household.</h1>
+      <p class="lc-lead">Five steps. Your information, your kids, your calendar. LovelyChaos handles the rest.</p>
+      <div style="display:flex; gap: 10px; flex-wrap: wrap; margin-top: 4px;">
+        <a class="lc-button" href="/auth/google/start?household_id=1" style="background: var(--lc-accent); color: #fff;">Connect Google Calendar</a>
+        <a class="lc-button" href="/design-language" style="background: transparent; color: rgba(250,246,240,0.7); border-color: rgba(255,255,255,0.2);">Design language</a>
+      </div>
+    </div>
+    <div class="v6-spread__right">
+      <p class="v6-spread__right-title">What you're setting up</p>
+      <div class="v6-spread__steps">
+        <div class="v6-spread__step">
+          <span class="v6-spread__n">I.</span>
+          <div>
+            <p class="v6-spread__s">Family profile</p>
+            <p class="v6-spread__d">Email, phone, and timezone — how LovelyChaos reaches you.</p>
+          </div>
+        </div>
+        <div class="v6-spread__step">
+          <span class="v6-spread__n">II.</span>
+          <div>
+            <p class="v6-spread__s">Kids and schools</p>
+            <p class="v6-spread__d">Grounds relevancy filtering and timezone resolution.</p>
+          </div>
+        </div>
+        <div class="v6-spread__step">
+          <span class="v6-spread__n">III.</span>
+          <div>
+            <p class="v6-spread__s">Priorities</p>
+            <p class="v6-spread__d">What your household cares about — and what to ignore.</p>
+          </div>
+        </div>
+        <div class="v6-spread__step">
+          <span class="v6-spread__n">IV.</span>
+          <div>
+            <p class="v6-spread__s">Digest cadence</p>
+            <p class="v6-spread__d">How often to batch slower-moving summaries.</p>
+          </div>
+        </div>
+        <div class="v6-spread__step">
+          <span class="v6-spread__n">V.</span>
+          <div>
+            <p class="v6-spread__s">Google Calendar</p>
+            <p class="v6-spread__d">Unlocks direct scheduling, not just email analysis.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section class="lc-stack">
+    <article class="lc-card" id="step-1">
+      <div class="v6-chapter">
+        <span class="v6-chapter__num">I.</span>
+        <span class="v6-chapter__rule"></span>
+        <span class="v6-chapter__name">Family profile</span>
+      </div>
+      <h2 class="lc-section-title" style="margin-bottom: 8px;">How should LovelyChaos reach you?</h2>
+      <p class="lc-intro" style="margin-bottom: 20px;">Your email and phone set the primary communication channel. Timezone is derived from your children's school — it auto-fills below.</p>
+      <form class="lc-form" method="post" action="/onboarding/profile/form">
+        <div class="lc-form-grid lc-form-grid--two">
+          <label class="lc-field">
+            <span class="lc-field__label">Admin email</span>
+            <input class="lc-input" name="admin_email" type="email" value="{{ profile.admin_email }}" required />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Admin phone</span>
+            <input class="lc-input" name="admin_phone" value="{{ profile.admin_phone }}" />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Timezone</span>
+            <input class="lc-input" id="timezone_value" name="timezone_value" value="{{ profile.timezone }}" readonly />
+          </label>
+        </div>
+        <p class="lc-note" id="school-timezone-status">Timezone auto-fills when you select a school in Step II.</p>
+        <button class="lc-button" type="submit">Save family profile</button>
+      </form>
+    </article>
+
+    <article class="lc-card" id="step-2">
+      <div class="v6-chapter">
+        <span class="v6-chapter__num">II.</span>
+        <span class="v6-chapter__rule"></span>
+        <span class="v6-chapter__name">Kids and schools</span>
+      </div>
+      <h2 class="lc-section-title" style="margin-bottom: 8px;">Your children and where they go to school.</h2>
+      <p class="lc-intro" style="margin-bottom: 20px;">School context is what separates a relevant school email from noise. LovelyChaos uses it to filter, route, and prioritize — automatically.</p>
+      <div class="lc-list">
+        {% for child in children %}
+          <div class="lc-list-item">
+            <div>
+              <p class="lc-list-item__title">{{ child.name }}</p>
+              <p class="lc-list-item__meta">{{ child.school_name }}{% if child.grade %} &middot; {{ child.grade }}{% endif %}</p>
+            </div>
+          </div>
+        {% else %}
+          <p class="lc-empty">No children added yet.</p>
+        {% endfor %}
+      </div>
+      <form class="lc-form" method="post" action="/onboarding/children/form" style="margin-top: 18px;">
+        <div class="lc-form-grid lc-form-grid--two">
+          <label class="lc-field">
+            <span class="lc-field__label">Child name</span>
+            <input class="lc-input" name="name" placeholder="Child name" required />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Grade</span>
+            <input class="lc-input" name="grade" placeholder="Grade" />
+          </label>
+        </div>
+        <label class="lc-field">
+          <span class="lc-field__label">School</span>
+          <span class="school-autocomplete">
+            <input class="lc-input" name="school_name" placeholder="School name" required autocomplete="off" data-school-autocomplete />
+            <div class="school-suggestions" data-school-suggestions></div>
+          </span>
+        </label>
+        <button class="lc-button" type="submit">Add child</button>
+      </form>
+    </article>
+
+    <article class="lc-card" id="step-3">
+      <div class="v6-chapter">
+        <span class="v6-chapter__num">III.</span>
+        <span class="v6-chapter__rule"></span>
+        <span class="v6-chapter__name">Priorities</span>
+      </div>
+      <h2 class="lc-section-title" style="margin-bottom: 8px;">What does your household care about?</h2>
+      <p class="lc-intro" style="margin-bottom: 20px;">Defaults cover the obvious ones. Your custom notes teach LovelyChaos the specifics — pizza days, swim meets, the things you do and don't want to hear about.</p>
+      <form class="lc-form" method="post" action="/onboarding/preferences/form">
+        <div>
+          <p class="lc-field__label">System defaults</p>
+          {% for item in prefs.system_defaults %}
+            <label class="lc-check">
+              <input type="checkbox" name="system_default_{{ item.key }}" {% if item.enabled %}checked{% endif %} />
+              <span>
+                <span class="lc-check__title">{{ item.label }}</span>
+                <span class="lc-check__copy">{{ item.description }} Examples: {{ item.examples | join(', ') }}.</span>
+              </span>
+            </label>
+          {% endfor %}
+        </div>
+        <label class="lc-field">
+          <span class="lc-field__label">In your own words</span>
+          <span class="lc-note">Type naturally. Include specific topic names and anything you want to skip. For example: <em>Pizza days, hot lunch, early dismissals. I don't care about cultural days.</em></span>
+          <textarea class="lc-textarea" name="raw_text">{{ prefs.raw_text }}</textarea>
+        </label>
+        {% if prefs.preference_parse_status == "error" %}
+          <div class="lc-note" style="border: 1px solid rgba(196,79,30,0.3); background: rgba(196,79,30,0.07); color: #8a3818;">
+            <strong>Saved, but could not interpret your notes right now.</strong>
+          </div>
+        {% elif prefs.raw_text.strip() %}
+          {% if prefs.parsed_priority_topics or prefs.suppressed_priority_topics %}
+            <div class="lc-note" style="border: 1px solid rgba(60,140,90,0.2); background: rgba(60,140,90,0.06);">
+              <strong>Interpreted successfully.</strong>
+            </div>
+          {% else %}
+            <div class="lc-note"><strong>Saved.</strong> Try naming topics more directly.</div>
+          {% endif %}
+        {% endif %}
+        <div class="lc-stack" style="gap: 12px;">
+          <div>
+            <p class="lc-field__label">Will surface</p>
+            <div class="lc-pill-row">
+              {% for topic in prefs.parsed_priority_topics %}<span class="lc-pill">{{ topic }}</span>
+              {% else %}<span class="lc-pill lc-pill--secondary">Nothing yet</span>{% endfor %}
+            </div>
+          </div>
+          <div>
+            <p class="lc-field__label">Will deprioritize</p>
+            <div class="lc-pill-row">
+              {% for topic in prefs.suppressed_priority_topics %}<span class="lc-pill lc-pill--secondary">{{ topic }}</span>
+              {% else %}<span class="lc-pill lc-pill--secondary">Nothing yet</span>{% endfor %}
+            </div>
+          </div>
+        </div>
+        <button class="lc-button" type="submit">Save priorities</button>
+      </form>
+    </article>
+
+    <article class="lc-card" id="step-4">
+      <div class="v6-chapter">
+        <span class="v6-chapter__num">IV.</span>
+        <span class="v6-chapter__rule"></span>
+        <span class="v6-chapter__name">Digest cadence</span>
+      </div>
+      <h2 class="lc-section-title" style="margin-bottom: 8px;">How often do you want a summary?</h2>
+      <p class="lc-intro" style="margin-bottom: 20px;">Informational emails — newsletters, FYI updates, anything that doesn't require action — get batched. Choose how often.</p>
+      <form class="lc-form" method="post" action="/onboarding/settings/form">
+        <label class="lc-check">
+          <input type="checkbox" name="daily_summary_enabled" {% if settings.daily_summary_enabled %}checked{% endif %} />
+          <span>
+            <span class="lc-check__title">Daily summary</span>
+            <span class="lc-check__copy">One digest per day. Good for fast-moving inboxes.</span>
+          </span>
+        </label>
+        <label class="lc-check">
+          <input type="checkbox" name="weekly_digest_enabled" {% if settings.weekly_digest_enabled %}checked{% endif %} />
+          <span>
+            <span class="lc-check__title">Weekly digest</span>
+            <span class="lc-check__copy">A once-a-week roundup of slower-moving logistics.</span>
+          </span>
+        </label>
+        <button class="lc-button" type="submit">Save digest settings</button>
+      </form>
+    </article>
+
+    <article class="lc-card lc-card--tint" id="step-5">
+      <div class="v6-chapter">
+        <span class="v6-chapter__num">V.</span>
+        <span class="v6-chapter__rule"></span>
+        <span class="v6-chapter__name">Google Calendar</span>
+      </div>
+      <h2 class="lc-section-title" style="margin-bottom: 8px;">Connect and unlock scheduling.</h2>
+      <p class="lc-intro" style="margin-bottom: 20px;">This is the step that moves LovelyChaos from passive analysis to active action. Once your calendar is connected, it can create and update events directly.</p>
+      <div class="lc-actions">
+        <a class="lc-button" href="/auth/google/start?household_id=1">Connect Google Calendar</a>
+      </div>
+      <p class="lc-note" style="margin-top: 16px;">After connecting, send email to <strong>schedule@lovelychaos.ca</strong> once inbound provider forwarding is configured.</p>
+    </article>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (() => {
+    const schoolInputs = document.querySelectorAll('[data-school-autocomplete]');
+    const timezoneInput = document.getElementById('timezone_value');
+    const status = document.getElementById('school-timezone-status');
+    const cachedMatches = new Map();
+    let activeContainer = null;
+    async function fetchMatches(q) { const r = await fetch(`/admin/schools/search?q=${encodeURIComponent(q)}`); if (!r.ok) return []; return (await r.json()).results || []; }
+    async function resolveSchool(n) { const r = await fetch(`/admin/schools/resolve?name=${encodeURIComponent(n)}`); if (!r.ok) return null; return r.json(); }
+    function clearSuggestions(c) { if (!c) return; c.innerHTML = ''; c.classList.remove('is-open'); }
+    function renderMatches(c, matches) { clearSuggestions(c); cachedMatches.clear(); for (const m of matches) { const o = document.createElement('div'); o.className = 'school-suggestion'; o.dataset.schoolName = m.school_name; o.innerHTML = `<strong>${m.school_name}</strong><small>${m.city} - ${m.board_name}</small>`; c.appendChild(o); cachedMatches.set(m.school_name.toLowerCase(), m); } if (matches.length) { c.classList.add('is-open'); activeContainer = c; } }
+    async function updateTimezone(n) { if (!n) return; const cached = cachedMatches.get(n.toLowerCase()); const resolved = cached || await resolveSchool(n); if (!resolved) { status.textContent = 'School not found. Timezone will resolve on save.'; return; } timezoneInput.value = resolved.timezone || timezoneInput.value; status.textContent = `Timezone set to ${resolved.timezone}${resolved.city ? ` (${resolved.city})` : ''}.`; }
+    for (const input of schoolInputs) {
+      const container = input.parentElement.querySelector('[data-school-suggestions]');
+      input.addEventListener('input', async (e) => { const q = e.target.value.trim(); if (q.length < 2) { clearSuggestions(container); return; } renderMatches(container, await fetchMatches(q)); });
+      input.addEventListener('change', (e) => updateTimezone(e.target.value.trim()));
+      input.addEventListener('blur', () => { window.setTimeout(() => clearSuggestions(container), 150); });
+      container.addEventListener('mousedown', (e) => { const o = e.target.closest('.school-suggestion'); if (!o) return; input.value = o.dataset.schoolName || ''; clearSuggestions(container); updateTimezone(input.value.trim()); });
+    }
+    document.addEventListener('mousedown', (e) => { if (activeContainer && !e.target.closest('.school-autocomplete')) { clearSuggestions(activeContainer); activeContainer = null; } });
+  })();
+</script>
+{% endblock %}

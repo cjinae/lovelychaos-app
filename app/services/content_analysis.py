@@ -11,6 +11,10 @@ from typing import Iterable, Optional
 import unicodedata
 from urllib.parse import parse_qs, urlparse
 
+from agents import Agent, Runner
+from agents.model_settings import ModelSettings, Reasoning
+from agents.models.openai_provider import OpenAIProvider
+from agents.run_config import RunConfig
 import httpx
 
 from app.services.llm import ExtractedEvent
@@ -46,6 +50,15 @@ Before finalizing:
 - Check that the output is plain text only.
 </verification_loop>
 """
+
+
+def _trace_metadata(values: dict[str, object] | None) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for key, value in dict(values or {}).items():
+        if value is None:
+            continue
+        metadata[str(key)] = str(value)
+    return metadata
 
 
 @dataclass
@@ -193,14 +206,23 @@ def build_analysis_text(body_text: str, attachments: Iterable[DownloadedAttachme
     return "\n\n".join(section for section in sections if section).strip()
 
 
-def extract_analysis_sections(body_text: str, attachments: Iterable[DownloadedAttachment]) -> list[AnalysisSection]:
+def extract_analysis_sections(
+    body_text: str,
+    attachments: Iterable[DownloadedAttachment],
+    priority_terms: Iterable[str] | None = None,
+) -> list[AnalysisSection]:
     sections: list[AnalysisSection] = []
+    normalized_priority_terms = [_normalize_for_compare(term) for term in list(priority_terms or []) if _normalize_for_compare(term)]
     for source_kind, raw_text in _iter_analysis_sources(body_text, attachments):
         paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", raw_text) if part.strip()]
         for paragraph in paragraphs:
             normalized = paragraph.strip()
             section_kind = _classify_section_kind(normalized)
             priority_score = _priority_for_section(normalized, section_kind)
+            if normalized_priority_terms:
+                lowered = _normalize_for_compare(normalized)
+                if any(term in lowered for term in normalized_priority_terms):
+                    priority_score = min(100, priority_score + 20)
             if priority_score <= 0:
                 continue
             label = _section_label(normalized, section_kind)
@@ -269,8 +291,9 @@ def build_prioritized_chunks(
     body_text: str,
     attachments: Iterable[DownloadedAttachment],
     max_chars: int = 5000,
+    priority_terms: Iterable[str] | None = None,
 ) -> tuple[list[AnalysisSection], list[AnalysisChunk]]:
-    sections = extract_analysis_sections(body_text, attachments)
+    sections = extract_analysis_sections(body_text, attachments, priority_terms=priority_terms)
     if not sections:
         analysis_text = build_analysis_text(body_text, attachments)
         return [], segment_analysis_text(analysis_text, max_chars=max_chars)
@@ -278,9 +301,9 @@ def build_prioritized_chunks(
     high_priority = [section for section in sections if section.priority_score >= 80]
     medium_priority = [section for section in sections if 50 <= section.priority_score < 80]
     low_priority = [section for section in sections if 0 < section.priority_score < 50]
-    ordered_sections = high_priority + medium_priority
-    if not ordered_sections:
-        ordered_sections = low_priority
+    # Preserve broad event coverage by keeping lower-priority sections after the
+    # highest-signal schedule/admin blocks instead of dropping them entirely.
+    ordered_sections = high_priority + medium_priority + low_priority
     chunks = _sections_to_chunks(ordered_sections, max_chars=max_chars)
     return sections, chunks
 
@@ -688,38 +711,25 @@ def _ocr_pdf_with_openai(content: bytes) -> str:
     if not settings.openai_api_key:
         return ""
 
-    headers = {
-        "Authorization": f"Bearer {settings.openai_api_key}",
-        "Content-Type": "application/json",
-    }
+    model_provider = OpenAIProvider(
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url.rstrip("/"),
+        use_responses=True,
+    )
     pages: list[str] = []
     with fitz.open(stream=content, filetype="pdf") as document:
         for page_index in range(document.page_count):
             page = document.load_page(page_index)
             pixmap = page.get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72))
             data_url = "data:image/png;base64," + base64.b64encode(pixmap.tobytes("png")).decode("ascii")
-            payload = {
-                "model": settings.openai_model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": OCR_PAGE_TEXT_PROMPT},
-                            {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}},
-                        ],
-                    }
-                ],
-            }
-            if not settings.openai_model.startswith("gpt-5"):
-                payload["temperature"] = 0
-            with httpx.Client(timeout=settings.openai_timeout_sec) as client:
-                response = client.post(
-                    f"{settings.openai_base_url.rstrip('/')}/chat/completions",
-                    headers=headers,
-                    json=payload,
-                )
-            response.raise_for_status()
-            page_text = response.json()["choices"][0]["message"]["content"].strip()
+            page_text = _run_ocr_page_agent(
+                data_url=data_url,
+                model=settings.openai_model,
+                reasoning_effort=settings.openai_reasoning_effort,
+                timeout_sec=settings.openai_timeout_sec,
+                store_responses=getattr(settings, "openai_store_responses", False),
+                model_provider=model_provider,
+            )
             if page_text:
                 pages.append(f"Page {page_index + 1}:\n{page_text}")
     return "\n\n".join(pages).strip()
@@ -727,3 +737,63 @@ def _ocr_pdf_with_openai(content: bytes) -> str:
 
 def _extracted_text_length(text: str) -> int:
     return len(re.sub(r"\s+", "", text or ""))
+
+
+def _run_ocr_page_agent(
+    *,
+    data_url: str,
+    model: str,
+    reasoning_effort: str,
+    timeout_sec: int,
+    store_responses: bool,
+    model_provider: OpenAIProvider,
+) -> str:
+    agent = Agent(
+        name="pdf_page_ocr",
+        instructions=OCR_PAGE_TEXT_PROMPT,
+        model=model,
+        model_settings=_ocr_model_settings(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            store_responses=store_responses,
+        ),
+    )
+    result = Runner.run_sync(
+        agent,
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": OCR_PAGE_TEXT_PROMPT},
+                    {"type": "input_image", "image_url": data_url, "detail": "high"},
+                ],
+            }
+        ],
+        run_config=RunConfig(
+            model_provider=model_provider,
+            model_settings=_ocr_model_settings(
+                model=model,
+                reasoning_effort=reasoning_effort,
+                store_responses=store_responses,
+            ),
+            workflow_name="LovelyChaos PDF OCR",
+            trace_metadata=_trace_metadata({"ocr": True}),
+        ),
+    )
+    return str(result.final_output or "").strip()
+
+
+def _ocr_model_settings(*, model: str, reasoning_effort: str, store_responses: bool) -> ModelSettings:
+    if model.startswith("gpt-5"):
+        return ModelSettings(
+            reasoning=Reasoning(effort=reasoning_effort),
+            store=store_responses,
+            truncation="auto",
+            include_usage=True,
+        )
+    return ModelSettings(
+        temperature=0,
+        store=store_responses,
+        truncation="auto",
+        include_usage=True,
+    )

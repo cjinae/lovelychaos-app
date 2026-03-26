@@ -1,13 +1,26 @@
+from __future__ import annotations
+
 from datetime import datetime, timedelta, timezone
 
-from app.models import Child
+from app.models import Child, TeacherContact
 from app.services.auto_add import evaluate_auto_add_candidate
 from app.services.llm import ExtractedEvent
 from app.services.relevancy import compute_relevancy_evidence
 
 
-def _child(child_id: int, name: str, school: str, grade: str) -> Child:
-    return Child(id=child_id, household_id=1, name=name, school_name=school, grade=grade, status="active")
+def _child(child_id: int, name: str, school: str, grade: str, teachers: list[tuple[str, str]] | None = None) -> Child:
+    return Child(
+        id=child_id,
+        household_id=1,
+        name=name,
+        school_name=school,
+        grade=grade,
+        status="active",
+        teacher_contacts=[
+            TeacherContact(teacher_name=teacher_name, teacher_email=teacher_email, status="active")
+            for teacher_name, teacher_email in (teachers or [])
+        ],
+    )
 
 
 def _event(title: str, *, reason: str = "", scope: str = "school_global", grades=None, schools=None, preference=False):
@@ -34,7 +47,7 @@ def test_auto_add_allows_school_breaks_and_holidays():
         target_grades=[],
         model_preference_match=True,
         children=children,
-        preference_text="school closures",
+        positive_preference_topics=["School Closures"],
     )
     decision = evaluate_auto_add_candidate(event, relevancy, children)
     assert decision.allow is True
@@ -54,7 +67,7 @@ def test_auto_add_blocks_optional_schoolwide_and_volunteer_items():
         target_grades=[],
         model_preference_match=False,
         children=children,
-        preference_text="school closures, pizza day",
+        positive_preference_topics=["Pizza Days"],
     )
     decision = evaluate_auto_add_candidate(event, relevancy, children)
     assert decision.allow is False
@@ -75,8 +88,51 @@ def test_auto_add_blocks_grade_mismatch():
         target_grades=["5"],
         model_preference_match=False,
         children=children,
-        preference_text="pizza day, swim schedule",
+        positive_preference_topics=["Pizza Days", "Swim Days"],
     )
     decision = evaluate_auto_add_candidate(event, relevancy, children)
     assert decision.allow is False
     assert decision.reason == "grade_mismatch"
+
+
+def test_auto_add_blocks_suppressed_preferences():
+    children = [_child(1, "Nolan", "Frankland", "1")]
+    event = _event("Spirit Day", reason="theme day", scope="school_global")
+    relevancy = compute_relevancy_evidence(
+        event_text="Spirit Day at Frankland",
+        target_grades=[],
+        model_preference_match=False,
+        children=children,
+        positive_preference_topics=["Spirit Days"],
+    )
+    decision = evaluate_auto_add_candidate(event, relevancy, children, suppressed_match=True)
+    assert decision.allow is False
+    assert decision.reason == "suppressed_preference"
+
+
+def test_auto_add_allows_teacher_linked_preference_event_without_child_name():
+    children = [
+        _child(
+            1,
+            "Nolan",
+            "Frankland",
+            "1",
+            teachers=[("Helen Poulos", "helen.poulos@tdsb.on.ca")],
+        )
+    ]
+    event = _event("Swim Day", reason="class swim tomorrow", scope="child_specific")
+    relevancy = compute_relevancy_evidence(
+        event_text="Swim Day class swim tomorrow",
+        target_grades=[],
+        model_preference_match=False,
+        children=children,
+        positive_preference_topics=["Swim Days"],
+        sender_email="helen.poulos@tdsb.on.ca",
+        sender_display_name="Helen Poulos",
+        target_scope="child_specific",
+    )
+
+    decision = evaluate_auto_add_candidate(event, relevancy, children)
+    assert relevancy.teacher_match is True
+    assert decision.allow is True
+    assert decision.reason == "household_specific_preference_event"

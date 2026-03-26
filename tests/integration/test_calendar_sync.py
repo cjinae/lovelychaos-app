@@ -7,7 +7,7 @@ from app.models import Event, SourceMessage
 from tests.fixtures import PAYLOAD_CLEAN
 
 
-def test_bucket_a_auto_add_syncs_calendar(client, db_session):
+def test_actionable_event_syncs_calendar(client, db_session):
     payload = dict(PAYLOAD_CLEAN)
     payload["provider_event_id"] = "evt-calendar-a"
     payload["provider_message_id"] = "msg-calendar-a"
@@ -23,17 +23,21 @@ def test_bucket_a_auto_add_syncs_calendar(client, db_session):
     assert event.calendar_event_id is not None
 
 
-def test_calendar_sync_failure_falls_back_to_pending(client):
+def test_calendar_sync_failure_leaves_no_event_and_returns_ingestion_success(client, db_session):
+    import app.main as main_module
+
     payload = dict(PAYLOAD_CLEAN)
     payload["provider_event_id"] = "evt-calendar-fail"
     payload["provider_message_id"] = "msg-calendar-fail"
 
-    if hasattr(calendar_provider, "fail_next"):
-        calendar_provider.fail_next = True
+    if hasattr(main_module.calendar_provider, "fail_next"):
+        main_module.calendar_provider.fail_next = True
 
     response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
     assert response.status_code == 200
     assert response.json()["status"] == "ingestion_accepted"
+    event = db_session.scalar(select(Event).where(Event.household_id == 1, Event.title == "School Closure Alert"))
+    assert event is None
 
 
 def test_delete_event_command_removes_calendar_event(client, db_session):

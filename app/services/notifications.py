@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Household, NotificationDelivery, User
+from app.services.openai_tracing import function_trace_span
 
 
 class NotificationSendError(Exception):
@@ -21,7 +22,13 @@ class NotificationResult:
 
 
 class NotificationProvider:
-    def send_email(self, to_email: str, subject: str, body: str) -> NotificationResult:
+    def send_email(
+        self,
+        to_email: str,
+        subject: str,
+        body: str,
+        headers: dict[str, str] | None = None,
+    ) -> NotificationResult:
         raise NotImplementedError
 
     def send_sms(self, to_phone: str, body: str) -> NotificationResult:
@@ -29,7 +36,13 @@ class NotificationProvider:
 
 
 class MockNotificationProvider(NotificationProvider):
-    def send_email(self, to_email: str, subject: str, body: str) -> NotificationResult:
+    def send_email(
+        self,
+        to_email: str,
+        subject: str,
+        body: str,
+        headers: dict[str, str] | None = None,
+    ) -> NotificationResult:
         return NotificationResult(status="sent", provider_ref=f"mock-email-{uuid.uuid4()}")
 
     def send_sms(self, to_phone: str, body: str) -> NotificationResult:
@@ -53,15 +66,25 @@ class ResendNotificationProvider(NotificationProvider):
         self.twilio_messaging_service_sid = twilio_messaging_service_sid
         self.twilio_phone_number = twilio_phone_number
 
-    def send_email(self, to_email: str, subject: str, body: str) -> NotificationResult:
+    def send_email(
+        self,
+        to_email: str,
+        subject: str,
+        body: str,
+        headers: dict[str, str] | None = None,
+    ) -> NotificationResult:
         if not self.api_key or not self.from_email:
             raise NotificationSendError("Resend is not configured")
-        with httpx.Client(timeout=10) as client:
-            response = client.post(
-                "https://api.resend.com/emails",
-                json={"from": self.from_email, "to": [to_email], "subject": subject, "text": body},
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            )
+        payload = {"from": self.from_email, "to": [to_email], "subject": subject, "text": body}
+        if headers:
+            payload["headers"] = headers
+        with function_trace_span("notification.send_email", input_text=f"to={to_email}\nsubject={subject}"):
+            with httpx.Client(timeout=10) as client:
+                response = client.post(
+                    "https://api.resend.com/emails",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                )
         if response.status_code >= 400:
             raise NotificationSendError(f"Resend error: {response.status_code}")
         payload = response.json()
@@ -77,12 +100,13 @@ class ResendNotificationProvider(NotificationProvider):
             payload["MessagingServiceSid"] = self.twilio_messaging_service_sid
         else:
             payload["From"] = self.twilio_phone_number
-        with httpx.Client(timeout=10) as client:
-            response = client.post(
-                f"https://api.twilio.com/2010-04-01/Accounts/{self.twilio_account_sid}/Messages.json",
-                data=payload,
-                auth=(self.twilio_account_sid, self.twilio_auth_token),
-            )
+        with function_trace_span("notification.send_sms", input_text=f"to={to_phone}\nlength={len(body)}"):
+            with httpx.Client(timeout=10) as client:
+                response = client.post(
+                    f"https://api.twilio.com/2010-04-01/Accounts/{self.twilio_account_sid}/Messages.json",
+                    data=payload,
+                    auth=(self.twilio_account_sid, self.twilio_auth_token),
+                )
         if response.status_code >= 400:
             raise NotificationSendError(f"Twilio error: {response.status_code}")
         twilio_payload = response.json()
@@ -96,9 +120,14 @@ def dispatch_household_notification(
     template: str,
     subject: str,
     message: str,
+    channel: str = "email",
 ) -> dict:
     household = db.scalar(select(Household).where(Household.id == household_id))
-    admin = db.scalar(select(User).where(User.household_id == household_id, User.is_admin.is_(True)))
+    admin = db.scalar(
+        select(User)
+        .where(User.household_id == household_id, User.is_admin.is_(True), User.verified.is_(True))
+        .order_by(User.id.asc())
+    )
     if not household or not admin:
         return {"sent": 0, "failed": 0}
 
@@ -119,16 +148,9 @@ def dispatch_household_notification(
             )
         )
 
-    # Admin email notification.
-    try:
-        result = provider.send_email(admin.email, subject=subject, body=message)
-        _record("admin", "email", admin.email, result, "sent")
-        sent += 1
-    except Exception:
-        _record("admin", "email", admin.email, None, "failed")
-        failed += 1
-
-    if admin.phone:
+    if channel == "sms":
+        if not admin.phone:
+            return {"sent": 0, "failed": 0}
         try:
             result = provider.send_sms(admin.phone, body=message)
             _record("admin", "sms", admin.phone, result, "sent")
@@ -136,16 +158,15 @@ def dispatch_household_notification(
         except Exception:
             _record("admin", "sms", admin.phone, None, "failed")
             failed += 1
+        return {"sent": sent, "failed": failed}
 
-    # Spouse receive-only notification path.
-    if household.spouse_notifications_enabled and household.spouse_phone:
-        try:
-            result = provider.send_sms(household.spouse_phone, body=message)
-            _record("spouse", "sms", household.spouse_phone, result, "sent")
-            sent += 1
-        except Exception:
-            _record("spouse", "sms", household.spouse_phone, None, "failed")
-            failed += 1
+    try:
+        result = provider.send_email(admin.email, subject=subject, body=message)
+        _record("admin", "email", admin.email, result, "sent")
+        sent += 1
+    except Exception:
+        _record("admin", "email", admin.email, None, "failed")
+        failed += 1
 
     return {"sent": sent, "failed": failed}
 
@@ -159,9 +180,10 @@ def send_email_notification(
     subject: str,
     message: str,
     recipient_type: str = "admin",
+    email_headers: dict[str, str] | None = None,
 ) -> dict:
     try:
-        result = provider.send_email(to_email, subject=subject, body=message)
+        result = provider.send_email(to_email, subject=subject, body=message, headers=email_headers)
         delivery = NotificationDelivery(
             household_id=household_id,
             recipient_type=recipient_type,
@@ -199,12 +221,13 @@ def send_channel_notification(
     template: str,
     subject: str,
     message: str,
+    email_headers: dict[str, str] | None = None,
 ) -> dict:
     try:
         if channel == "sms":
             result = provider.send_sms(target, body=message)
         else:
-            result = provider.send_email(target, subject=subject, body=message)
+            result = provider.send_email(target, subject=subject, body=message, headers=email_headers)
         delivery = NotificationDelivery(
             household_id=household_id,
             recipient_type=recipient_type,

@@ -2,7 +2,19 @@ import httpx
 
 from sqlalchemy import select
 
-from app.models import Child, DecisionAudit, Event, InformationalItem, NotificationDelivery, PendingEvent, SourceMessage, User, WebhookReceipt
+from app.models import (
+    AgentSessionItem,
+    Child,
+    DecisionAudit,
+    Event,
+    FollowupContext,
+    InformationalItem,
+    NotificationDelivery,
+    SourceMessage,
+    TeacherContact,
+    User,
+    WebhookReceipt,
+)
 from app.services.llm import ExtractedEvent
 from tests.fixtures import PAYLOAD_CLEAN, PAYLOAD_LOW_CONFIDENCE, PAYLOAD_UNKNOWN_SENDER
 
@@ -33,7 +45,7 @@ def test_inbound_ambiguous_sender_fail_closed(client, db_session):
     assert response.json()["status"] == "rejected_ambiguous_sender"
 
 
-def test_inbound_second_verified_admin_sender_accepted(client, db_session):
+def test_inbound_second_verified_admin_sender_rejected(client, db_session):
     db_session.add(User(household_id=1, email="christine.jinae@gmail.com", is_admin=True, verified=True))
     db_session.commit()
 
@@ -43,7 +55,7 @@ def test_inbound_second_verified_admin_sender_accepted(client, db_session):
     payload["sender"] = "christine.jinae@gmail.com"
     response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
     assert response.status_code == 200
-    assert response.json()["status"] == "ingestion_accepted"
+    assert response.json()["status"] == "rejected_unverified_sender"
 
 
 def test_inbound_validation_reject(client):
@@ -61,7 +73,152 @@ def test_duplicate_webhook_is_deduped(client):
     assert second.json()["message"].startswith("Duplicate webhook")
 
 
-def test_batch_b_pending_created(client, db_session):
+def test_inbound_persists_source_before_thread_document_upload(client, session_factory, monkeypatch):
+    import app.main as main_module
+    from app.services.content_analysis import DownloadedAttachment, LinkResolutionReport
+
+    payload = dict(PAYLOAD_CLEAN)
+    payload["provider_event_id"] = "evt-doc-commit"
+    payload["provider_message_id"] = "msg-doc-commit"
+    payload["subject"] = "Frankland attachment update"
+    payload["body_text"] = "Please review the attached newsletter."
+
+    observed = {"checked": False}
+
+    def fake_resolve_and_download_links(_links):
+        return LinkResolutionReport(
+            attachments=[
+                DownloadedAttachment(
+                    filename="newsletter.pdf",
+                    content_type="application/pdf",
+                    content=b"%PDF-1.4",
+                    source_url="https://example.com/newsletter.pdf",
+                    status_reason="fixture",
+                    extracted_text="Family Math Night recap and spring registration details.",
+                )
+            ],
+            attempts=[],
+        )
+
+    def fake_persist_thread_documents(
+        db,
+        *,
+        household_id,
+        source_message_id,
+        thread_key,
+        attachments,
+        **_kwargs,
+    ):
+        with session_factory() as verify_db:
+            source = verify_db.scalar(
+                select(SourceMessage).where(SourceMessage.provider_message_id == payload["provider_message_id"])
+            )
+            receipt = verify_db.scalar(
+                select(WebhookReceipt).where(WebhookReceipt.provider_event_id == payload["provider_event_id"])
+            )
+            assert source is not None
+            assert source.id == source_message_id
+            assert source.thread_key == thread_key
+            assert receipt is not None
+            assert receipt.status == "received"
+        observed["checked"] = True
+        return []
+
+    monkeypatch.setattr(main_module, "resolve_and_download_links", fake_resolve_and_download_links)
+    monkeypatch.setattr(main_module, "persist_thread_documents", fake_persist_thread_documents)
+
+    response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
+
+    assert response.status_code == 200
+    assert observed["checked"] is True
+
+
+def test_inbound_commits_user_turn_before_llm_extraction(client, session_factory, monkeypatch):
+    import app.main as main_module
+    from app.services.agent_threads import email_session_id
+
+    payload = dict(PAYLOAD_CLEAN)
+    payload["provider_event_id"] = "evt-session-commit"
+    payload["provider_message_id"] = "msg-session-commit"
+    payload["subject"] = "Frankland user-turn commit"
+
+    session_id = email_session_id(household_id=1, thread_key=payload["provider_message_id"])
+    observed = {"checked": False}
+    original_extract = main_module.engine_llm.extract_events
+
+    def fake_extract_events(*args, **kwargs):
+        with session_factory() as verify_db:
+            items = list(
+                verify_db.scalars(
+                    select(AgentSessionItem).where(AgentSessionItem.session_id == session_id)
+                )
+            )
+            assert items
+            assert any("Email subject" in str(item.payload or {}) for item in items)
+        observed["checked"] = True
+        return original_extract(*args, **kwargs)
+
+    monkeypatch.setattr(main_module.engine_llm, "extract_events", fake_extract_events)
+
+    response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
+
+    assert response.status_code == 200
+    assert observed["checked"] is True
+
+
+def test_inbound_commits_processed_state_before_recap_send(client, session_factory, monkeypatch):
+    import app.main as main_module
+
+    payload = dict(PAYLOAD_CLEAN)
+    payload["provider_event_id"] = "evt-recap-commit"
+    payload["provider_message_id"] = "msg-recap-commit"
+    payload["subject"] = "Frankland recap commit"
+
+    observed = {"checked": False}
+
+    def fake_send_channel_notification(
+        db,
+        provider,
+        *,
+        household_id,
+        recipient_type,
+        channel,
+        target,
+        template,
+        subject,
+        message,
+        email_headers=None,
+    ):
+        del db, provider, household_id, recipient_type, channel, target, template, subject, message, email_headers
+        with session_factory() as verify_db:
+            receipt = verify_db.scalar(
+                select(WebhookReceipt).where(WebhookReceipt.provider_event_id == payload["provider_event_id"])
+            )
+            source = verify_db.scalar(
+                select(SourceMessage).where(SourceMessage.provider_message_id == payload["provider_message_id"])
+            )
+            assert receipt is not None
+            assert receipt.status == "processed"
+            assert receipt.processed_at is not None
+            assert source is not None
+            assert verify_db.scalar(
+                select(FollowupContext).where(FollowupContext.source_message_id == source.id)
+            ) is not None
+            assert verify_db.scalar(
+                select(DecisionAudit).where(DecisionAudit.household_id == source.household_id)
+            ) is not None
+        observed["checked"] = True
+        return {"sent": 1, "failed": 0}
+
+    monkeypatch.setattr(main_module, "send_channel_notification", fake_send_channel_notification)
+
+    response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
+
+    assert response.status_code == 200
+    assert observed["checked"] is True
+
+
+def test_relevant_non_actionable_event_is_preserved_for_followup(client, db_session):
     db_session.add(Child(household_id=1, name="Nolan", school_name="Frankland", grade="1", status="active"))
     db_session.commit()
 
@@ -73,8 +230,9 @@ def test_batch_b_pending_created(client, db_session):
     response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
     assert response.status_code == 200
 
-    pending = db_session.scalars(select(PendingEvent).where(PendingEvent.household_id == 1)).all()
-    assert len(pending) >= 1
+    followup = db_session.scalar(select(FollowupContext).where(FollowupContext.household_id == 1))
+    assert followup is not None
+    assert any(item.get("action_capabilities", {}).get("can_explain") for item in list(followup.all_extracted_items or []))
 
 
 def test_event_links_source_message(client, db_session):
@@ -88,8 +246,8 @@ def test_event_links_source_message(client, db_session):
     assert message is not None
     event = db_session.scalar(select(Event).where(Event.source_message_id == message.id))
     info = db_session.scalar(select(InformationalItem).where(InformationalItem.source_message_id == message.id))
-    pending = db_session.scalars(select(PendingEvent).where(PendingEvent.household_id == 1)).all()
-    assert event is not None or info is not None or pending
+    followup = db_session.scalar(select(FollowupContext).where(FollowupContext.source_message_id == message.id))
+    assert event is not None or info is not None or followup is not None
 
 
 def test_multi_event_independent_routing(client, db_session, monkeypatch):
@@ -112,7 +270,6 @@ def test_multi_event_independent_routing(client, db_session, monkeypatch):
                         confidence=0.95,
                         target_scope="grade_specific",
                         target_grades=["1"],
-                        model_batch="A",
                         model_reason="grade1",
                     ),
                     ExtractedEvent(
@@ -122,7 +279,6 @@ def test_multi_event_independent_routing(client, db_session, monkeypatch):
                         category="school",
                         confidence=0.93,
                         target_scope="school_global",
-                        model_batch="C",
                         model_reason="global",
                     ),
                     ExtractedEvent(
@@ -133,7 +289,6 @@ def test_multi_event_independent_routing(client, db_session, monkeypatch):
                         confidence=0.95,
                         target_scope="child_specific",
                         mentioned_names=["Nolan"],
-                        model_batch="B",
                         model_reason="missing time",
                     ),
                 ],
@@ -153,11 +308,159 @@ def test_multi_event_independent_routing(client, db_session, monkeypatch):
     assert response.json()["status"] == "ingestion_accepted"
 
     events = db_session.scalars(select(Event).where(Event.household_id == 1)).all()
-    pending = db_session.scalars(select(PendingEvent).where(PendingEvent.household_id == 1)).all()
     info = db_session.scalars(select(InformationalItem).where(InformationalItem.household_id == 1)).all()
+    followup = db_session.scalar(select(FollowupContext).where(FollowupContext.household_id == 1))
     assert len(events) >= 1
-    assert len(pending) >= 1
     assert len(info) >= 1
+    assert followup is not None
+
+
+def test_forwarded_teacher_email_uses_original_sender_and_reference_date_for_auto_add(client, db_session, monkeypatch):
+    import app.main as main_module
+    from datetime import datetime, timedelta, timezone
+
+    admin = db_session.scalar(select(User).where(User.email == "admin@example.com"))
+    assert admin is not None
+    admin.timezone = "America/Toronto"
+    child = Child(
+        household_id=1,
+        name="Nolan",
+        school_name="Frankland Community School Junior",
+        grade="1",
+        status="active",
+    )
+    child.teacher_contacts = [
+        TeacherContact(teacher_name="Helen Poulos", teacher_email="helen.poulos@tdsb.on.ca", status="active")
+    ]
+    db_session.add(child)
+    db_session.commit()
+
+    captured = {}
+
+    class _Engine:
+        def extract_events(self, *_args, **kwargs):
+            captured["reference_datetime_hint"] = kwargs.get("reference_datetime_hint")
+            start = datetime.now(timezone.utc) + timedelta(days=7)
+            return {
+                "events": [
+                    ExtractedEvent(
+                        title="Swim Day",
+                        start_at=start,
+                        end_at=start + timedelta(hours=1),
+                        category="school",
+                        confidence=0.97,
+                        target_scope="child_specific",
+                        mentioned_names=[],
+                        mentioned_schools=[],
+                        target_grades=[],
+                        preference_match=False,
+                        model_reason="Class swim tomorrow from Ms. Poulos",
+                    )
+                ],
+                "email_level_notes": None,
+            }
+
+        def extract_summary_candidates(self, summary_context):
+            return {
+                "title": summary_context["title_hint"],
+                "candidates": list(summary_context["fallback_candidates"]),
+                "notes": [],
+                "missing_requested_topics": [],
+            }
+
+        def compress_summary(self, summary_context):
+            return {
+                "title": summary_context["title_hint"],
+                "important_info": [item for item in list(summary_context["candidates"]) if item.get("has_date")],
+                "other_dates": [],
+                "other_topics": [],
+                "missing_requested_topics": [],
+                "notes": [],
+            }
+
+        def metadata(self):
+            return {"provider": "mock", "model": "teacher-test", "prompt_versions": {}}
+
+    monkeypatch.setattr(main_module, "engine_llm", _Engine())
+
+    payload = dict(PAYLOAD_CLEAN)
+    payload["provider_event_id"] = "evt-teacher-linked-1"
+    payload["provider_message_id"] = "msg-teacher-linked-1"
+    payload["subject"] = "Fwd: Room 106 - Swim tomorrow!"
+    payload["body_text"] = (
+        "---------- Forwarded message ---------\n"
+        "From: Helen Poulos <helen.poulos@tdsb.on.ca>\n"
+        "Date: Sun, Mar 1, 2026 at 6:53 PM\n"
+        "Subject: Room 106 - Swim tomorrow!\n"
+        "To: Parent <parent@example.com>\n\n"
+        "Dear Families,\nTomorrow is swim day.\n"
+    )
+
+    response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "ingestion_accepted"
+    assert captured["reference_datetime_hint"] == "2026-03-01T23:53:00+00:00"
+
+    event = db_session.scalar(select(Event).where(Event.household_id == 1, Event.title == "Swim Day"))
+    assert event is not None
+
+
+def test_fyi_only_teacher_email_uses_informational_footer(client, db_session, monkeypatch):
+    import app.main as main_module
+
+    child = Child(
+        household_id=1,
+        name="Nolan",
+        school_name="Frankland Community School Junior",
+        grade="1",
+        status="active",
+    )
+    child.teacher_contacts = [
+        TeacherContact(teacher_name="Helen Poulos", teacher_email="helen.poulos@tdsb.on.ca", status="active")
+    ]
+    db_session.add(child)
+    db_session.commit()
+
+    class _Engine:
+        def extract_events(self, *_args, **_kwargs):
+            return {"events": [], "email_level_notes": None}
+
+        def extract_summary_candidates(self, _summary_context):
+            raise RuntimeError("force deterministic summary fallback")
+
+        def compress_summary(self, _summary_context):
+            raise RuntimeError("force deterministic summary fallback")
+
+        def metadata(self):
+            return {"provider": "mock", "model": "teacher-info-test", "prompt_versions": {}}
+
+    monkeypatch.setattr(main_module, "engine_llm", _Engine())
+
+    payload = dict(PAYLOAD_CLEAN)
+    payload["provider_event_id"] = "evt-teacher-fyi-1"
+    payload["provider_message_id"] = "msg-teacher-fyi-1"
+    payload["subject"] = "Fwd: Room 106 Update"
+    payload["body_text"] = (
+        "---------- Forwarded message ---------\n"
+        "From: Helen Poulos <helen.poulos@tdsb.on.ca>\n"
+        "Date: Fri, Jan 30, 2026 at 2:43 PM\n"
+        "Subject: Room 106 Update\n"
+        "To: Parent <parent@example.com>\n\n"
+        "Dear Families,\nSafe arrival still applies if your child is absent.\n"
+    )
+
+    response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "ingestion_accepted"
+
+    delivery = db_session.scalar(
+        select(NotificationDelivery)
+        .where(NotificationDelivery.household_id == 1, NotificationDelivery.template == "email_analysis_recap")
+        .order_by(NotificationDelivery.id.desc())
+    )
+    assert delivery is not None
+    assert "This looks informational only" in delivery.message
+    assert "Let me know if you want me to add any of these to the calendar" not in delivery.message
 
 
 def test_inbound_sends_formatted_analysis_recap(client, db_session, monkeypatch):
@@ -172,26 +475,24 @@ def test_inbound_sends_formatted_analysis_recap(client, db_session, monkeypatch)
         def extract_events(self, *_args, **_kwargs):
             return {
                 "events": [
-                            ExtractedEvent(
-                                title="First day back from winter break",
-                                start_at=datetime(2026, 1, 5, 8, 30, tzinfo=timezone.utc),
-                                end_at=datetime(2026, 1, 5, 9, 30, tzinfo=timezone.utc),
-                                category="school",
-                                confidence=0.98,
-                                target_scope="child_specific",
-                                mentioned_names=["Nolan"],
-                                model_batch="A",
-                            model_reason="clear date",
-                        ),
-                        ExtractedEvent(
-                            title="Pizza Lunch",
-                            start_at=None,
-                            end_at=None,
-                            category="school",
-                            confidence=0.95,
-                            target_scope="child_specific",
-                            mentioned_names=["Nolan"],
-                        model_batch="B",
+                    ExtractedEvent(
+                        title="First day back from winter break",
+                        start_at=datetime(2026, 1, 5, 8, 30, tzinfo=timezone.utc),
+                        end_at=datetime(2026, 1, 5, 9, 30, tzinfo=timezone.utc),
+                        category="school",
+                        confidence=0.98,
+                        target_scope="child_specific",
+                        mentioned_names=["Nolan"],
+                        model_reason="clear date",
+                    ),
+                    ExtractedEvent(
+                        title="Pizza Lunch",
+                        start_at=None,
+                        end_at=None,
+                        category="school",
+                        confidence=0.95,
+                        target_scope="child_specific",
+                        mentioned_names=["Nolan"],
                         model_reason="needs confirmation",
                     ),
                     ExtractedEvent(
@@ -201,7 +502,6 @@ def test_inbound_sends_formatted_analysis_recap(client, db_session, monkeypatch)
                         category="school",
                         confidence=0.9,
                         target_scope="school_global",
-                        model_batch="C",
                         model_reason="informational",
                     ),
                 ],
@@ -256,22 +556,21 @@ def test_inbound_sends_formatted_analysis_recap(client, db_session, monkeypatch)
             calls["compress_summary"] += 1
             return {
                 "title": "Frankland Update (Jan 5)",
-                "important_dates": [
+                "important_info": [
                     {
                         "text": "Jan 5: First day back from winter break",
                         "source_refs": ["event:first_day"],
                         "applies_to": ["Nolan"],
                         "date_sort_key": "2026-01-05T08:30:00+00:00",
                     },
-                ],
-                "important_items": [
                     {
                         "text": "Pizza Lunch order window",
                         "source_refs": ["event:pizza"],
                         "applies_to": ["Nolan"],
                         "date_sort_key": None,
-                    }
+                    },
                 ],
+                "other_dates": [],
                 "other_topics": [
                     {
                         "text": "Tamil Heritage Month mentioned",
@@ -310,19 +609,17 @@ def test_inbound_sends_formatted_analysis_recap(client, db_session, monkeypatch)
     assert delivery is not None
     assert calls == {"extract_summary": 1, "compress_summary": 1}
     assert delivery.message.startswith("Frankland Update (Jan 5)")
-    assert "\n\nImportant Dates\n" in delivery.message
-    assert "- Jan 5: First day back from winter break" in delivery.message
-    assert "\n\nImportant Items\n" in delivery.message
+    assert "\n\nImportant Info\n" in delivery.message
+    assert "First day back from winter break" in delivery.message
     assert "- Pizza Lunch order window" in delivery.message
     assert "\n\nOther Logistics / Topics Mentioned\n" in delivery.message
     assert "- Tamil Heritage Month mentioned" in delivery.message
     assert "Let me know if you want me to add any of these to the calendar" in delivery.message
     assert "Email analyzed:" not in delivery.message
     assert "Needs your input:" not in delivery.message
-    assert "Batch A" not in delivery.message
     assert audit is not None
     assert audit.model_output["summary"]["final_summary"]["title"] == "Frankland Update (Jan 5)"
-    assert audit.model_output["summary"]["final_summary"]["important_dates"][0]["text"] == "Jan 5: First day back from winter break"
+    assert "First day back from winter break" in audit.model_output["summary"]["final_summary"]["important_info"][0]["text"]
 
 
 def test_auto_add_gate_demotes_optional_and_duplicate_schoolwide_events(client, db_session, monkeypatch):
@@ -347,7 +644,6 @@ def test_auto_add_gate_demotes_optional_and_duplicate_schoolwide_events(client, 
                         confidence=0.98,
                         target_scope="school_global",
                         preference_match=True,
-                        model_batch="A",
                         model_reason="school break",
                     ),
                     ExtractedEvent(
@@ -358,7 +654,6 @@ def test_auto_add_gate_demotes_optional_and_duplicate_schoolwide_events(client, 
                         confidence=0.95,
                         target_scope="school_global",
                         preference_match=True,
-                        model_batch="C",
                         model_reason="holiday",
                     ),
                     ExtractedEvent(
@@ -368,7 +663,6 @@ def test_auto_add_gate_demotes_optional_and_duplicate_schoolwide_events(client, 
                         category="school",
                         confidence=0.95,
                         target_scope="school_global",
-                        model_batch="C",
                         model_reason="awareness day",
                     ),
                     ExtractedEvent(
@@ -379,7 +673,6 @@ def test_auto_add_gate_demotes_optional_and_duplicate_schoolwide_events(client, 
                         confidence=0.95,
                         target_scope="school_specific",
                         mentioned_schools=["Frankland"],
-                        model_batch="B",
                         model_reason="meeting",
                     ),
                     ExtractedEvent(
@@ -390,7 +683,6 @@ def test_auto_add_gate_demotes_optional_and_duplicate_schoolwide_events(client, 
                         confidence=0.95,
                         target_scope="school_specific",
                         mentioned_schools=["Frankland"],
-                        model_batch="A",
                         model_reason="school event",
                     ),
                     ExtractedEvent(
@@ -401,7 +693,6 @@ def test_auto_add_gate_demotes_optional_and_duplicate_schoolwide_events(client, 
                         confidence=0.96,
                         target_scope="school_specific",
                         mentioned_schools=["Frankland"],
-                        model_batch="A",
                         model_reason="school fundraiser",
                     ),
                     ExtractedEvent(
@@ -413,7 +704,6 @@ def test_auto_add_gate_demotes_optional_and_duplicate_schoolwide_events(client, 
                         target_scope="grade_specific",
                         target_grades=["5"],
                         mentioned_schools=["Frankland"],
-                        model_batch="A",
                         model_reason="grade 5 event",
                     ),
                 ],
@@ -430,19 +720,12 @@ def test_auto_add_gate_demotes_optional_and_duplicate_schoolwide_events(client, 
 
         def compress_summary(self, summary_context):
             candidates = summary_context["candidates"]
+            mentioned = [item for item in candidates if item.get("consolidated_priority") == "mentioned"]
             return {
                 "title": "Frankland Update",
-                "important_dates": [
-                    item
-                    for item in candidates
-                    if item.get("consolidated_priority") == "important" and item.get("has_date")
-                ][:8],
-                "important_items": [
-                    item
-                    for item in candidates
-                    if item.get("consolidated_priority") == "important" and not item.get("has_date")
-                ][:4],
-                "other_topics": [item for item in candidates if item.get("consolidated_priority") == "mentioned"][:6],
+                "important_info": [item for item in candidates if item.get("consolidated_priority") == "important"][:8],
+                "other_dates": [item for item in mentioned if item.get("has_date")][:6],
+                "other_topics": [item for item in mentioned if not item.get("has_date")][:6],
                 "missing_requested_topics": [],
                 "notes": [],
             }
@@ -462,20 +745,23 @@ def test_auto_add_gate_demotes_optional_and_duplicate_schoolwide_events(client, 
     assert response.json()["status"] == "ingestion_accepted"
 
     events = db_session.scalars(select(Event).where(Event.household_id == 1)).all()
-    pending = db_session.scalars(select(PendingEvent).where(PendingEvent.household_id == 1)).all()
     info = db_session.scalars(select(InformationalItem).where(InformationalItem.household_id == 1)).all()
+    followup = db_session.scalar(select(FollowupContext).where(FollowupContext.household_id == 1))
     audit = db_session.scalar(select(DecisionAudit).where(DecisionAudit.request_id == response.json()["request_id"]))
 
     assert sorted(event.title for event in events) == ["Good Friday", "March Break"]
-    assert len([item for item in pending if "Spring Swap" in item.title]) == 1
-    assert any(item.title == "School Council meeting" for item in pending)
-    assert any(item.title == "Grade 5 girls volleyball tournament" for item in pending)
+    assert followup is not None
+    followup_titles = {str(item.get("title") or "") for item in list(followup.all_extracted_items or [])}
+    assert "School Council meeting" in followup_titles
+    assert "Grade 5 girls volleyball tournament" in followup_titles
+    assert any("Spring Swap" in title for title in followup_titles)
     assert any(item.title == "World Down Syndrome Day" for item in info)
     outcomes = (audit.committed_actions or {}).get("event_outcomes") or []
     march_break = next(item for item in outcomes if item["title"] == "March Break")
     spring_swap = next(item for item in outcomes if "Spring Swap" in item["title"])
     assert march_break["auto_add_decision"]["allow"] is True
     assert spring_swap["auto_add_decision"]["allow"] is False
+    assert next(item for item in outcomes if item["title"] == "School Council meeting")["execution_disposition"] == "followup_available"
 
 
 def test_forwarded_add_preface_uses_command_mode_and_preface_only(client, db_session, monkeypatch):
@@ -499,7 +785,6 @@ def test_forwarded_add_preface_uses_command_mode_and_preface_only(client, db_ses
                         confidence=0.98,
                         target_scope="school_specific",
                         mentioned_schools=["Frankland"],
-                        model_batch="A",
                         model_reason="clear forwarded event",
                     )
                 ],
@@ -518,9 +803,10 @@ def test_forwarded_add_preface_uses_command_mode_and_preface_only(client, db_ses
             return {
                 "mode": "command",
                 "action": "add",
+                "execution_strategy": "deterministic",
                 "topic": None,
                 "preference_behavior": None,
-                "pending_id": None,
+                "event_id": None,
                 "minutes_before": None,
                 "reminder_channel": None,
                 "async_requested": False,
@@ -583,6 +869,7 @@ def test_forwarded_ambiguous_preface_needs_clarification(client, db_session, mon
             return {
                 "mode": "clarification",
                 "action": "none",
+                "execution_strategy": "none",
                 "topic": None,
                 "preference_behavior": None,
                 "minutes_before": None,
@@ -615,9 +902,119 @@ def test_forwarded_ambiguous_preface_needs_clarification(client, db_session, mon
     assert response.json()["status"] == "command_needs_clarification"
 
     event = db_session.scalar(select(Event).where(Event.household_id == 1))
-    pending = db_session.scalar(select(PendingEvent).where(PendingEvent.household_id == 1))
     assert event is None
-    assert pending is None
+
+
+def test_forwarded_preface_parse_error_falls_back_to_direct_preface_command(client, db_session, monkeypatch):
+    import app.main as main_module
+
+    class _Engine:
+        def parse_command(self, body_text):
+            assert "tell me more about African Heritage Month trait" in body_text
+            return {
+                "action": "more_info",
+                "execution_strategy": "semantic",
+                "event_id": None,
+                "topic": "African Heritage Month trait — Fairness",
+                "preference_behavior": None,
+                "minutes_before": 0,
+                "reminder_channel": None,
+                "async_requested": False,
+                "confidence": 0.98,
+            }
+
+        def parse_forwarded_preface_intent(self, **_kwargs):
+            raise RuntimeError("bad request")
+
+        def metadata(self):
+            return {"provider": "mock", "model": "test", "prompt_versions": {}}
+
+    monkeypatch.setattr(main_module, "engine_llm", _Engine())
+
+    payload = dict(PAYLOAD_CLEAN)
+    payload["provider_event_id"] = "evt-forwarded-parse-fallback-1"
+    payload["provider_message_id"] = "msg-forwarded-parse-fallback-1"
+    payload["subject"] = "Re: LovelyChaos: Fwd: Frankland Newsletter - January 28, 2025"
+    payload["body_text"] = (
+        "tell me more about African Heritage Month trait — Fairness\n\n"
+        "On Fri, Mar 20, 2026 at 1:55 PM <schedule@lovelychaos.ca> wrote:\n\n"
+        "> Frankland CS Update (Jan 28)\n"
+        "> - Feb 12: African Heritage Month trait — Fairness\n"
+    )
+    response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "command_completed"
+
+    delivery = db_session.scalar(
+        select(NotificationDelivery)
+        .where(NotificationDelivery.household_id == 1, NotificationDelivery.template == "more_info")
+        .order_by(NotificationDelivery.id.desc())
+    )
+    assert delivery is not None
+    assert "African Heritage Month trait" in delivery.message
+
+    receipt = db_session.scalar(
+        select(WebhookReceipt).where(WebhookReceipt.provider_event_id == "evt-forwarded-parse-fallback-1")
+    )
+    assert receipt is not None
+    assert receipt.status == "processed"
+
+
+def test_forwarded_preface_parse_error_sends_clarification_reply(client, db_session, monkeypatch):
+    import app.main as main_module
+
+    class _Engine:
+        def parse_command(self, _body_text):
+            return {
+                "action": "none",
+                "execution_strategy": "none",
+                "event_id": None,
+                "topic": None,
+                "preference_behavior": None,
+                "minutes_before": 0,
+                "reminder_channel": None,
+                "async_requested": False,
+                "confidence": 0.0,
+            }
+
+        def parse_forwarded_preface_intent(self, **_kwargs):
+            raise RuntimeError("bad request")
+
+        def metadata(self):
+            return {"provider": "mock", "model": "test", "prompt_versions": {}}
+
+    monkeypatch.setattr(main_module, "engine_llm", _Engine())
+
+    payload = dict(PAYLOAD_CLEAN)
+    payload["provider_event_id"] = "evt-forwarded-parse-clarify-1"
+    payload["provider_message_id"] = "msg-forwarded-parse-clarify-1"
+    payload["subject"] = "Fwd: School update"
+    payload["body_text"] = (
+        "can you handle this?\n\n"
+        "---------- Forwarded message ---------\n"
+        "From: Frankland CS <donotreply@tdsb.on.ca>\n"
+        "Date: Tue, Mar 10, 2026 at 8:21 AM\n"
+        "Subject: School update\n"
+        "To: <christine.jinae@gmail.com>\n\n"
+        "Some forwarded content.\n"
+    )
+    response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "command_needs_clarification"
+
+    delivery = db_session.scalar(
+        select(NotificationDelivery)
+        .where(NotificationDelivery.household_id == 1, NotificationDelivery.template == "command_clarification")
+        .order_by(NotificationDelivery.id.desc())
+    )
+    assert delivery is not None
+    assert "couldn't interpret the request" in delivery.message
+
+    receipt = db_session.scalar(
+        select(WebhookReceipt).where(WebhookReceipt.provider_event_id == "evt-forwarded-parse-clarify-1")
+    )
+    assert receipt is not None
+    assert receipt.status == "processed"
 
 
 def test_forwarded_fyi_preface_stays_ingestion(client, db_session, monkeypatch):
@@ -638,7 +1035,6 @@ def test_forwarded_fyi_preface_stays_ingestion(client, db_session, monkeypatch):
                         target_scope="school_specific",
                         mentioned_schools=["Frankland"],
                         preference_match=True,
-                        model_batch="A",
                         model_reason="pizza",
                     )
                 ],
@@ -649,6 +1045,7 @@ def test_forwarded_fyi_preface_stays_ingestion(client, db_session, monkeypatch):
             return {
                 "mode": "ingestion",
                 "action": "none",
+                "execution_strategy": "none",
                 "topic": None,
                 "preference_behavior": None,
                 "minutes_before": None,
@@ -702,7 +1099,6 @@ def test_forwarded_add_with_multiple_actionable_events_needs_clarification(clien
                         category="school",
                         confidence=0.98,
                         target_scope="school_specific",
-                        model_batch="A",
                         model_reason="event 1",
                     ),
                     ExtractedEvent(
@@ -712,7 +1108,6 @@ def test_forwarded_add_with_multiple_actionable_events_needs_clarification(clien
                         category="school",
                         confidence=0.96,
                         target_scope="school_specific",
-                        model_batch="A",
                         model_reason="event 2",
                     ),
                 ],
@@ -723,9 +1118,10 @@ def test_forwarded_add_with_multiple_actionable_events_needs_clarification(clien
             return {
                 "mode": "command",
                 "action": "add",
+                "execution_strategy": "deterministic",
                 "topic": None,
                 "preference_behavior": None,
-                "pending_id": None,
+                "event_id": None,
                 "minutes_before": None,
                 "reminder_channel": None,
                 "async_requested": False,
@@ -776,7 +1172,6 @@ def test_forwarded_add_with_past_event_returns_noop_past_event(client, db_sessio
                         category="school",
                         confidence=0.95,
                         target_scope="school_specific",
-                        model_batch="A",
                         model_reason="past event",
                     )
                 ],
@@ -787,9 +1182,10 @@ def test_forwarded_add_with_past_event_returns_noop_past_event(client, db_sessio
             return {
                 "mode": "command",
                 "action": "add",
+                "execution_strategy": "deterministic",
                 "topic": None,
                 "preference_behavior": None,
-                "pending_id": None,
+                "event_id": None,
                 "minutes_before": None,
                 "reminder_channel": None,
                 "async_requested": False,
@@ -838,7 +1234,6 @@ def test_forwarded_add_with_topic_scoped_dates_returns_clean_past_events(client,
                         category="school",
                         confidence=0.72,
                         target_scope="school_specific",
-                        model_batch="B",
                         model_reason="swim",
                     ),
                     ExtractedEvent(
@@ -848,7 +1243,6 @@ def test_forwarded_add_with_topic_scoped_dates_returns_clean_past_events(client,
                         category="school",
                         confidence=0.7,
                         target_scope="school_specific",
-                        model_batch="B",
                         model_reason="swim",
                     ),
                 ],
@@ -859,9 +1253,10 @@ def test_forwarded_add_with_topic_scoped_dates_returns_clean_past_events(client,
             return {
                 "mode": "command",
                 "action": "add",
+                "execution_strategy": "deterministic",
                 "topic": "swim dates",
                 "preference_behavior": None,
-                "pending_id": None,
+                "event_id": None,
                 "minutes_before": None,
                 "reminder_channel": None,
                 "async_requested": False,
@@ -912,9 +1307,10 @@ def test_forwarded_add_with_plural_command_allows_multiple_resolved_events(clien
             return {
                 "mode": "command",
                 "action": "add",
+                "execution_strategy": "deterministic",
                 "topic": None,
                 "preference_behavior": None,
-                "pending_id": None,
+                "event_id": None,
                 "minutes_before": None,
                 "reminder_channel": None,
                 "async_requested": False,
@@ -991,7 +1387,7 @@ def test_empty_extraction_with_informational_sections_returns_summary(client, db
         def compress_summary(self, summary_context):
             return {
                 "title": "Frankland Update",
-                "important_dates": [
+                "important_info": [
                     {
                         "text": "Dec 3: Direct donation deadline",
                         "source_refs": ["section:donation"],
@@ -999,7 +1395,7 @@ def test_empty_extraction_with_informational_sections_returns_summary(client, db
                         "date_sort_key": "2025-12-03T05:00:00+00:00",
                     }
                 ],
-                "important_items": [],
+                "other_dates": [],
                 "other_topics": [
                     {
                         "text": "Fundraising or donation updates",
@@ -1106,7 +1502,6 @@ def test_begin_forwarded_message_format_detected_for_command_preface(client, db_
                         category="school",
                         confidence=0.98,
                         target_scope="school_specific",
-                        model_batch="A",
                         model_reason="clear event",
                     )
                 ],
@@ -1125,9 +1520,10 @@ def test_begin_forwarded_message_format_detected_for_command_preface(client, db_
             return {
                 "mode": "command",
                 "action": "add",
+                "execution_strategy": "deterministic",
                 "topic": None,
                 "preference_behavior": None,
-                "pending_id": None,
+                "event_id": None,
                 "minutes_before": None,
                 "reminder_channel": None,
                 "async_requested": False,
@@ -1184,7 +1580,6 @@ def test_forwarded_footer_does_not_trigger_command_mode(client, db_session, monk
                         target_scope="school_specific",
                         mentioned_schools=["Frankland"],
                         preference_match=True,
-                        model_batch="A",
                         model_reason="pizza",
                     )
                 ],
@@ -1237,7 +1632,6 @@ def test_chunk_failure_still_processes_other_chunks(client, db_session, monkeypa
                         target_scope="school_specific",
                         mentioned_schools=["Frankland"],
                         preference_match=True,
-                        model_batch="A",
                         model_reason="swim",
                     )
                 ],
@@ -1267,7 +1661,50 @@ def test_chunk_failure_still_processes_other_chunks(client, db_session, monkeypa
 
     audit = db_session.scalar(select(DecisionAudit).where(DecisionAudit.household_id == 1).order_by(DecisionAudit.id.desc()))
     assert audit is not None
-    assert audit.policy_outcome["counts"]["create_event"] == 1
+    assert audit.policy_outcome["counts"]["event_created"] == 1
+    assert audit.model_output["analysis"]["chunk_failures"][0]["detail"] == "ReadTimeout"
+
+
+def test_all_chunk_failures_fall_back_to_summary_recap(client, db_session, monkeypatch):
+    import app.main as main_module
+
+    class _Engine:
+        def extract_events(self, *_args, **_kwargs):
+            raise httpx.ReadTimeout("timed out")
+
+        def metadata(self):
+            return {"provider": "mock", "model": "test", "prompt_versions": {}}
+
+    monkeypatch.setattr(main_module, "engine_llm", _Engine())
+
+    payload = dict(PAYLOAD_CLEAN)
+    payload["provider_event_id"] = "evt-chunk-fallback-1"
+    payload["provider_message_id"] = "msg-chunk-fallback-1"
+    payload["subject"] = "Frankland Update"
+    payload["body_text"] = (
+        "Important Dates\n"
+        "Mar 16-20: March Break\n\n"
+        "Other Logistics / Topics Mentioned\n"
+        "Mar 31: School Council meeting\n"
+        "Mandatory forms or payments\n"
+    )
+    response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "ingestion_accepted"
+
+    delivery = db_session.scalar(
+        select(NotificationDelivery).where(NotificationDelivery.template == "email_analysis_recap")
+    )
+    audit = db_session.scalar(select(DecisionAudit).where(DecisionAudit.household_id == 1).order_by(DecisionAudit.id.desc()))
+    info = db_session.scalar(select(InformationalItem).where(InformationalItem.household_id == 1))
+    assert delivery is not None
+    assert info is not None
+    assert "School Council meeting" in delivery.message
+    assert "This looks informational only" in delivery.message
+    assert audit is not None
+    assert audit.policy_outcome["status"] == "processed"
+    assert "llm_extraction_error" in audit.validator_result["issues"]
+    assert "empty_extraction_informational_fallback" in audit.validator_result["issues"]
     assert audit.model_output["analysis"]["chunk_failures"][0]["detail"] == "ReadTimeout"
 
 
@@ -1292,7 +1729,6 @@ def test_upcoming_dates_section_is_attempted_first(client, db_session, monkeypat
                         target_scope="school_specific",
                         mentioned_schools=["Frankland"],
                         preference_match=True,
-                        model_batch="A",
                         model_reason="pa day",
                     )
                 ],
@@ -1346,7 +1782,6 @@ def test_body_only_newsletter_uses_section_prioritization(client, db_session, mo
                         target_scope="school_specific",
                         mentioned_schools=["Frankland"],
                         preference_match=True,
-                        model_batch="A",
                         model_reason="body-only",
                     )
                 ],

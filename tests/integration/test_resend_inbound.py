@@ -129,3 +129,64 @@ def test_resend_inbound_fetches_received_email_when_body_missing(client, db_sess
     msg = db_session.scalar(select(SourceMessage).where(SourceMessage.provider_message_id == "resend-msg-fetch-1"))
     assert msg is not None
     assert "PA day Mar 6" in msg.body_text
+
+
+def test_resend_inbound_persists_thread_headers_and_thread_key(client, db_session, monkeypatch):
+    import app.main as main_module
+
+    root = SourceMessage(
+        provider="resend",
+        provider_message_id="root-provider-id",
+        source_channel="email",
+        sender="admin@example.com",
+        household_id=1,
+        subject="Root",
+        body_text="Root",
+        internet_message_id="<root@example.com>",
+        thread_key="<root@example.com>",
+    )
+    db_session.add(root)
+    db_session.commit()
+
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        SimpleNamespace(resend_webhook_secret="", webhook_secret="local-dev-secret", resend_api_key="re_test"),
+    )
+
+    def fake_retrieve(email_id: str):
+        assert email_id == "email-threaded"
+        return {
+            "text": "Reply body",
+            "headers": [
+                {"name": "Message-ID", "value": "<reply@example.com>"},
+                {"name": "In-Reply-To", "value": "<root@example.com>"},
+                {"name": "References", "value": "<root@example.com>"},
+            ],
+            "message_id": "<reply@example.com>",
+        }
+
+    monkeypatch.setattr(main_module, "_retrieve_resend_received_email", fake_retrieve)
+
+    payload = {
+        "id": "resend-evt-thread-1",
+        "type": "email.received",
+        "data": {
+            "message_id": "<reply@example.com>",
+            "id": "resend-msg-thread-1",
+            "email_id": "email-threaded",
+            "from": "admin@example.com",
+            "to": ["schedule@lovelychaos.ca"],
+            "subject": "Re: Root",
+        },
+    }
+
+    response = client.post("/webhooks/resend/inbound", json=payload)
+
+    assert response.status_code == 200
+    msg = db_session.scalar(select(SourceMessage).where(SourceMessage.provider_message_id == "resend-msg-thread-1"))
+    assert msg is not None
+    assert msg.internet_message_id == "<reply@example.com>"
+    assert msg.in_reply_to_message_id == "<root@example.com>"
+    assert msg.references_header == "<root@example.com>"
+    assert msg.thread_key == "<root@example.com>"

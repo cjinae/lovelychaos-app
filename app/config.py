@@ -31,10 +31,24 @@ class Settings:
     twilio_phone_number: str = os.getenv("TWILIO_PHONE_NUMBER", "")
     llm_mode: str = os.getenv("LLM_MODE", "mock")
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
-    openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-    openai_timeout_sec: int = int(os.getenv("OPENAI_TIMEOUT_SEC", "60"))
+    openai_model: str = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
+    openai_reasoning_effort: str = os.getenv("OPENAI_REASONING_EFFORT", "medium")
+    openai_tracing_enabled: bool = os.getenv("OPENAI_TRACING_ENABLED", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    openai_store_responses: bool = os.getenv("OPENAI_STORE_RESPONSES", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    openai_timeout_sec: int = int(os.getenv("OPENAI_TIMEOUT_SEC", "20"))
     openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     local_test_response_channel_override: str = os.getenv("LOCAL_TEST_RESPONSE_CHANNEL_OVERRIDE", "").strip().lower()
+    local_test_admin_email: str = os.getenv("LOCAL_TEST_ADMIN_EMAIL", "").strip().lower()
     admin_api_key: str = os.getenv("ADMIN_API_KEY", "")
 
 

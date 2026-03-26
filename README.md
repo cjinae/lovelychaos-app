@@ -1,6 +1,6 @@
 # LovelyChaos
 
-LovelyChaos is a FastAPI app for handling school communication on behalf of a family. It ingests inbound email and SMS, extracts the parts that matter, turns clear schedule items into calendar actions, stores informational updates for digesting, and keeps enough conversational context to support follow-up replies like "tell me more", "add this", "delete 42", or "please keep adding pizza lunches".
+LovelyChaos is a FastAPI app for handling school communication on behalf of a family. It is meant to behave like a helpful assistant, not just a date or event operator: it ingests inbound email and SMS, explains what matters in plain language, turns clear schedule items into calendar actions when appropriate, stores informational updates for digesting, and keeps enough conversational context to support follow-up replies like "tell me more", "add this", "delete 42", or "please keep adding pizza lunches".
 
 The current product is no longer a "Phase 1" stub. The codebase now includes live provider integrations, a real onboarding/admin surface, preference-aware summarization, teacher-contact matching, PDF/attachment processing, Google Calendar OAuth, and SMS follow-up flows.
 
@@ -32,6 +32,7 @@ The current product is no longer a "Phase 1" stub. The codebase now includes liv
   - supports mock and live Google Calendar providers
 - Conversational follow-up:
   - email and SMS can request `add`, `more_info`, `delete`, `remind`, and `set_preference`
+  - `more_info` replies should feel assistant-like and grounded, paraphrasing the school update instead of copying source text back to the parent
   - SMS keeps short-lived numbered disambiguation state when a reply could refer to multiple recent items
   - follow-up context is persisted so later replies can resolve "this", topic names, or numbered selections
 - Operator surfaces:
@@ -63,6 +64,7 @@ Useful local pages:
 - `http://127.0.0.1:8000/onboarding`
 - `http://127.0.0.1:8000/admin`
 - `http://127.0.0.1:8000/architecture-diagrams`
+- `http://127.0.0.1:8000/architecture-diagrams-agentsdk`
 
 ## Environment variables
 
@@ -81,6 +83,7 @@ LLM:
 - `OPENAI_MODEL`
 - `OPENAI_REASONING_EFFORT`
 - `OPENAI_TRACING_ENABLED`
+- `OPENAI_STORE_RESPONSES`
 - `OPENAI_TIMEOUT_SEC`
 - `OPENAI_BASE_URL`
 
@@ -166,6 +169,7 @@ HTML surfaces:
 - `GET /onboarding/v3`
 - `GET /design-language`
 - `GET /architecture-diagrams`
+- `GET /architecture-diagrams-agentsdk`
 
 ## Supported follow-up commands
 

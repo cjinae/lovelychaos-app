@@ -60,6 +60,13 @@
             <div>
               <p class="lc-list-item__title">{{ child.name }}</p>
               <p class="lc-list-item__meta">{{ child.school_name }}{% if child.grade %} · {{ child.grade }}{% endif %}</p>
+              {% if child.teacher_contacts %}
+                <p class="lc-list-item__meta">
+                  {% for contact in child.teacher_contacts %}
+                    {{ contact.teacher_name or contact.teacher_email }}{% if contact.teacher_name and contact.teacher_email %} · {{ contact.teacher_email }}{% endif %}{% if not loop.last %}<br />{% endif %}
+                  {% endfor %}
+                </p>
+              {% endif %}
             </div>
           </div>
         {% else %}
@@ -84,6 +91,11 @@
             <div class="school-suggestions" data-school-suggestions></div>
           </span>
         </label>
+        <label class="lc-field">
+          <span class="lc-field__label">Teacher contacts</span>
+          <span class="lc-note">One teacher per line. Use `Name &lt;email&gt;` or just the email.</span>
+          <textarea class="lc-textarea" name="teacher_contacts_text" placeholder="Helen Poulos <helen.poulos@tdsb.on.ca>"></textarea>
+        </label>
         <p class="lc-note" id="admin-school-timezone-status">School search uses the GTA directory and falls back to location lookup when needed.</p>
         <button class="lc-button" type="submit">Add child</button>
       </form>
@@ -97,40 +109,95 @@
       </div>
       <p class="lc-note"><strong>Version:</strong> {{ prefs.version }}</p>
       <form class="lc-form" method="post" action="/admin/preferences/form">
-        <div class="lc-stack" style="gap: 14px;">
-          <div>
-            <p class="lc-field__label">System default priorities</p>
-            {% for item in prefs.system_defaults %}
-              <label class="lc-check">
-                <input type="checkbox" name="system_default_{{ item.key }}" {% if item.enabled %}checked{% endif %} />
-                <span>
-                  <span class="lc-check__title">{{ item.label }}</span>
-                  <span class="lc-check__copy">{{ item.description }} Examples: {{ item.examples | join(', ') }}.</span>
-                </span>
-              </label>
-            {% endfor %}
-          </div>
-          <div>
-            <p class="lc-field__label">User priority topics</p>
-            <div class="lc-pill-row" data-topic-preview>
-              {% for topic in prefs.user_priority_topics %}
-                <span class="lc-pill">{{ topic }}</span>
-              {% else %}
-                <span class="lc-pill lc-pill--secondary">No custom topics yet</span>
-              {% endfor %}
-            </div>
-            <label class="lc-field">
-              <span class="lc-field__label">Priority topics (one per line)</span>
-              <textarea class="lc-textarea" name="user_priority_topics" data-topic-textarea>{{ prefs.user_priority_topics | join('\n') }}</textarea>
+        <div>
+          <p class="lc-field__label">System default priorities</p>
+          {% for item in prefs.system_defaults %}
+            <label class="lc-check">
+              <input type="checkbox" name="system_default_{{ item.key }}" {% if item.enabled %}checked{% endif %} />
+              <span>
+                <span class="lc-check__title">{{ item.label }}</span>
+                <span class="lc-check__copy">{{ item.description }} Examples: {{ item.examples | join(', ') }}.</span>
+              </span>
             </label>
-          </div>
+          {% endfor %}
         </div>
         <label class="lc-field">
-          <span class="lc-field__label">Raw preference notes</span>
+          <span class="lc-field__label">Household preference notes</span>
+          <span class="lc-note">Use natural language here. The app will parse both positive interests and negative preferences when you save.</span>
           <textarea class="lc-textarea" name="raw_text">{{ prefs.raw_text }}</textarea>
         </label>
-        <div>
-          <p class="lc-field__label">Saved conversational rules</p>
+        {% if prefs.preference_parse_status == "error" %}
+          <div class="lc-note" style="border: 1px solid rgba(227, 70, 52, 0.3); border-radius: 18px; padding: 14px 16px; background: rgba(227, 70, 52, 0.08); color: #7a2b22;">
+            <strong>Saved your notes, but LovelyChaos could not interpret them right now.</strong>
+            <br />
+            <code>{{ prefs.preference_parse_error }}</code>
+          </div>
+        {% elif prefs.raw_text.strip() %}
+          {% if prefs.parsed_priority_topics or prefs.suppressed_priority_topics %}
+            <div class="lc-note" style="border: 1px solid rgba(35, 64, 38, 0.18); border-radius: 18px; padding: 14px 16px; background: rgba(35, 64, 38, 0.05);">
+              <strong>LovelyChaos interpreted your notes successfully.</strong>
+              <br />
+              Last saved interpretation is shown below.
+            </div>
+          {% else %}
+            <div class="lc-note" style="border: 1px solid rgba(43, 39, 36, 0.14); border-radius: 18px; padding: 14px 16px; background: rgba(43, 39, 36, 0.04);">
+              <strong>Saved, but nothing in these notes was specific enough to turn into preferences yet.</strong>
+            </div>
+          {% endif %}
+        {% endif %}
+        <div class="lc-stack" style="gap: 12px;">
+          <div>
+            <p class="lc-field__label">Last generated interpretation: important</p>
+            <div class="lc-pill-row">
+              {% for topic in prefs.parsed_priority_topics %}
+                <span class="lc-pill">{{ topic }}</span>
+              {% else %}
+                {% if prefs.preference_parse_status == "error" %}
+                  <span class="lc-pill lc-pill--secondary">Interpretation failed on the last save</span>
+                {% else %}
+                  <span class="lc-pill lc-pill--secondary">No interpreted positive preferences yet</span>
+                {% endif %}
+              {% endfor %}
+            </div>
+          </div>
+          <div>
+            <p class="lc-field__label">Last generated interpretation: less important</p>
+            <div class="lc-pill-row">
+              {% for topic in prefs.parsed_suppressed_priority_topics %}
+                <span class="lc-pill lc-pill--secondary">{{ topic }}</span>
+              {% else %}
+                {% if prefs.preference_parse_status == "error" %}
+                  <span class="lc-pill lc-pill--secondary">Interpretation failed on the last save</span>
+                {% else %}
+                  <span class="lc-pill lc-pill--secondary">No interpreted negative preferences yet</span>
+                {% endif %}
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+        <div class="lc-note" style="border: 1px solid rgba(43, 39, 36, 0.14); border-radius: 18px; padding: 14px 16px; background: rgba(43, 39, 36, 0.04);">
+          {% if prefs.admin_override_active %}
+            <strong>Admin override is active.</strong>
+            LovelyChaos is currently using the editable topics below instead of the generated interpretation.
+          {% else %}
+            <strong>Generated topics are active.</strong>
+            Save the editable topics below to create an admin override, or regenerate from notes to keep using parser output.
+          {% endif %}
+        </div>
+        <div class="lc-form-grid lc-form-grid--two">
+          <label class="lc-field">
+            <span class="lc-field__label">Topics LovelyChaos should treat as important</span>
+            <span class="lc-note">One topic per line. Saving these creates an admin override.</span>
+            <textarea class="lc-textarea" name="admin_priority_topics_text">{% if prefs.admin_override_active %}{{ prefs.admin_priority_topics | join('\n') }}{% else %}{{ prefs.user_priority_topics | join('\n') }}{% endif %}</textarea>
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Topics LovelyChaos should treat as less important</span>
+            <span class="lc-note">One topic per line. These will suppress matching topics unless a system default still applies.</span>
+            <textarea class="lc-textarea" name="admin_suppressed_priority_topics_text">{% if prefs.admin_override_active %}{{ prefs.admin_suppressed_priority_topics | join('\n') }}{% else %}{{ prefs.suppressed_priority_topics | join('\n') }}{% endif %}</textarea>
+          </label>
+        </div>
+        <details>
+          <summary class="lc-field__label">Advanced conversational rules</summary>
           <div class="lc-pill-row">
             {% for rule in prefs.command_written_preferences %}
               <span class="lc-pill lc-pill--secondary">{{ rule.label }} · {{ rule.behavior }}</span>
@@ -138,8 +205,11 @@
               <span class="lc-pill lc-pill--secondary">No command-written rules yet</span>
             {% endfor %}
           </div>
+        </details>
+        <div class="lc-actions">
+          <button class="lc-button" type="submit" name="prefs_action" value="save">Save admin topics</button>
+          <button class="lc-button lc-button--secondary" type="submit" name="prefs_action" value="regenerate">Regenerate from notes</button>
         </div>
-        <button class="lc-button" type="submit">Save priority profile</button>
       </form>
     </article>
 
@@ -245,19 +315,6 @@
           activeContainer = null;
         }
       });
-
-      const topicTextarea = document.querySelector('[data-topic-textarea]');
-      const topicPreview = document.querySelector('[data-topic-preview]');
-      if (topicTextarea && topicPreview) {
-        const renderTopics = () => {
-          const topics = topicTextarea.value.split('\n').map((value) => value.trim()).filter(Boolean);
-          topicPreview.innerHTML = topics.length
-            ? topics.map((topic) => `<span class="lc-pill">${topic}</span>`).join('')
-            : '<span class="lc-pill lc-pill--secondary">No custom topics yet</span>';
-        };
-        topicTextarea.addEventListener('input', renderTopics);
-        renderTopics();
-      }
     })();
   </script>
 {% endblock %}

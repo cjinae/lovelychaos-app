@@ -1,9 +1,10 @@
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import select
 from twilio.request_validator import RequestValidator
 
 from app.config import settings
-from app.models import Event, SourceMessage, User
+from app.models import Event, GoogleCredential, SourceMessage, User
 from tests.fixtures import PAYLOAD_SMS_CONFIRM
 
 
@@ -80,14 +81,14 @@ def test_sms_ambiguous_sender_rejected(client, db_session):
     assert response.json()["status"] == "rejected_ambiguous_sender"
 
 
-def test_sms_spouse_receive_only_rejected(client):
+def test_sms_non_primary_number_rejected(client):
     payload = dict(PAYLOAD_SMS_CONFIRM)
-    payload["provider_event_id"] = "sms-evt-spouse"
-    payload["provider_message_id"] = "sms-msg-spouse"
+    payload["provider_event_id"] = "sms-evt-non-primary"
+    payload["provider_message_id"] = "sms-msg-non-primary"
     payload["sender_phone"] = "+15550000002"
     response = client.post("/webhooks/sms/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
     assert response.status_code == 200
-    assert response.json()["status"] == "rejected_unauthorized"
+    assert response.json()["status"] == "rejected_unverified_sender"
 
 
 def test_sms_legacy_confirm_is_unsupported(client):
@@ -127,3 +128,27 @@ def test_sms_delete_command_still_supported(client, db_session):
     response = client.post("/webhooks/sms/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
     assert response.status_code == 200
     assert response.json()["status"] == "command_completed"
+
+
+def test_sms_add_command_bypasses_token_refresh_in_mock_calendar_mode(client, db_session):
+    original_mode = settings.google_calendar_mode
+    object.__setattr__(settings, "google_calendar_mode", "mock")
+    credential = db_session.scalar(select(GoogleCredential).where(GoogleCredential.household_id == 1))
+    assert credential is not None
+    credential.token_expiry = datetime.now(timezone.utc) - timedelta(days=1)
+    credential.refresh_token = None
+    db_session.commit()
+
+    payload = dict(PAYLOAD_SMS_CONFIRM)
+    payload["provider_event_id"] = "sms-add-evt"
+    payload["provider_message_id"] = "sms-add-msg"
+    payload["body_text"] = "add Family Field Trip to the cal for May 9, 2099"
+
+    try:
+        response = client.post("/webhooks/sms/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
+        assert response.status_code == 200
+        assert response.json()["status"] == "command_completed"
+        event = db_session.scalar(select(Event).where(Event.household_id == 1, Event.title == "Family Field Trip"))
+        assert event is not None
+    finally:
+        object.__setattr__(settings, "google_calendar_mode", original_mode)

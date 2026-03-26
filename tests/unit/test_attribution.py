@@ -19,9 +19,8 @@ def test_attribution_second_verified_admin_same_household(db_session):
     db_session.add(User(household_id=1, email="parent2@example.com", is_admin=True, verified=True))
     db_session.commit()
     result = resolve_admin_sender(db_session, "parent2@example.com")
-    assert result.kind == "ok"
-    assert result.user is not None
-    assert result.user.household_id == 1
+    assert result.kind == "unverified"
+    assert result.user is None
 
 
 def test_attribution_ambiguous_match(db_session):

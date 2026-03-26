@@ -5,6 +5,7 @@ import re
 import unicodedata
 
 from app.models import Child
+from app.services.priorities import topic_matches_text
 
 
 def _normalize_text(value: str) -> str:
@@ -108,6 +109,8 @@ def _school_match_score(event_text: str, school_name: str) -> bool:
 class RelevancyEvidence:
     name_match: bool
     name_child_ids: list[int]
+    teacher_match: bool
+    teacher_child_ids: list[int]
     school_match: bool
     school_child_ids: list[int]
     grade_match: bool
@@ -116,12 +119,14 @@ class RelevancyEvidence:
 
     @property
     def is_relevant(self) -> bool:
-        return self.name_match or self.school_match or self.grade_match or self.preference_match
+        return self.name_match or self.teacher_match or self.school_match or self.grade_match or self.preference_match
 
     def as_dict(self) -> dict:
         return {
             "name_match": self.name_match,
             "name_child_ids": self.name_child_ids,
+            "teacher_match": self.teacher_match,
+            "teacher_child_ids": self.teacher_child_ids,
             "school_match": self.school_match,
             "school_child_ids": self.school_child_ids,
             "grade_match": self.grade_match,
@@ -130,17 +135,39 @@ class RelevancyEvidence:
         }
 
 
+def _teacher_contact_matches(child: Child, sender_email: str, sender_display_name: str) -> bool:
+    contacts = list(getattr(child, "teacher_contacts", []) or [])
+    if not contacts:
+        return False
+
+    sender_email_norm = _normalize_text(sender_email)
+    sender_name_norm = _normalize_text(sender_display_name)
+    for contact in contacts:
+        if str(getattr(contact, "status", "active") or "active").strip().lower() != "active":
+            continue
+        contact_email = _normalize_text(getattr(contact, "teacher_email", ""))
+        contact_name = _normalize_text(getattr(contact, "teacher_name", ""))
+        if sender_email_norm and contact_email and sender_email_norm == contact_email:
+            return True
+        if sender_name_norm and contact_name and sender_name_norm == contact_name:
+            return True
+    return False
+
+
 def compute_relevancy_evidence(
     event_text: str,
     target_grades: list[str],
     model_preference_match: bool,
     children: list[Child],
-    preference_text: str,
+    positive_preference_topics: list[str],
+    sender_email: str = "",
+    sender_display_name: str = "",
+    target_scope: str = "unknown",
 ) -> RelevancyEvidence:
     event_norm = _normalize_text(event_text)
-    pref_norm = _normalize_text(preference_text)
 
     name_ids: list[int] = []
+    teacher_ids: list[int] = []
     school_ids: list[int] = []
     grade_ids: list[int] = []
 
@@ -151,24 +178,30 @@ def compute_relevancy_evidence(
     for child in children:
         if _name_match_score(event_norm, child.name):
             name_ids.append(child.id)
-        if _school_match_score(event_norm, child.school_name):
-            school_ids.append(child.id)
         child_grade = normalize_grade(child.grade)
         if child_grade and child_grade in target_grade_set:
             grade_ids.append(child.id)
         if not target_grade_set and child_grade and child_grade in event_norm.split():
             grade_ids.append(child.id)
+        grade_conflict = bool(target_grade_set) and bool(child_grade) and child_grade not in target_grade_set
+        if (
+            target_scope != "school_global"
+            and not grade_conflict
+            and _teacher_contact_matches(child, sender_email, sender_display_name)
+        ):
+            teacher_ids.append(child.id)
+        if _school_match_score(event_norm, child.school_name):
+            school_ids.append(child.id)
 
-    preference_match = bool(model_preference_match)
-    if not preference_match and pref_norm:
-        pref_tokens = [t for t in pref_norm.split() if len(t) >= 4]
-        if pref_tokens:
-            overlap = len(_stem_tokens(set(pref_tokens)) & _stem_tokens(_token_set(event_norm)))
-            preference_match = overlap >= 1
+    preference_match = any(topic_matches_text(topic, event_text) for topic in positive_preference_topics)
+    if not preference_match and not positive_preference_topics:
+        preference_match = bool(model_preference_match)
 
     return RelevancyEvidence(
         name_match=bool(name_ids),
         name_child_ids=sorted(set(name_ids)),
+        teacher_match=bool(teacher_ids),
+        teacher_child_ids=sorted(set(teacher_ids)),
         school_match=bool(school_ids),
         school_child_ids=sorted(set(school_ids)),
         grade_match=bool(grade_ids),

@@ -37,7 +37,7 @@ def test_maybe_extract_pdf_text_falls_back_to_ocr_when_parser_output_is_weak(mon
     assert "October 10 PA Day" in result
 
 
-def test_ocr_pdf_with_openai_uses_gpt5_compatible_payload(monkeypatch):
+def test_ocr_pdf_with_openai_uses_agent_sdk(monkeypatch):
     import app.config as config_module
     import app.services.content_analysis as content_analysis_module
 
@@ -76,37 +76,19 @@ def test_ocr_pdf_with_openai_uses_gpt5_compatible_payload(monkeypatch):
             assert filetype == "pdf"
             return _FakeDocument()
 
-    class _MockResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"choices": [{"message": {"content": "October 7 Open House"}}]}
-
-    class _CaptureClient:
-        def __init__(self, timeout: int):
-            self.timeout = timeout
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def post(self, url, headers=None, json=None):  # noqa: A002
-            captured["url"] = url
-            captured["headers"] = headers
-            captured["payload"] = json
-            return _MockResponse()
+    def fake_run_ocr_page_agent(**kwargs):
+        captured.update(kwargs)
+        return "October 7 Open House"
 
     monkeypatch.setitem(sys.modules, "fitz", _FakeFitzModule())
-    monkeypatch.setattr(content_analysis_module.httpx, "Client", _CaptureClient)
+    monkeypatch.setattr(content_analysis_module, "_run_ocr_page_agent", fake_run_ocr_page_agent)
     monkeypatch.setattr(
         config_module,
         "settings",
         SimpleNamespace(
             openai_api_key="test-key",
             openai_model="gpt-5-mini-2025-08-07",
+            openai_reasoning_effort="medium",
             openai_timeout_sec=20,
             openai_base_url="https://api.openai.com/v1",
         ),
@@ -115,11 +97,47 @@ def test_ocr_pdf_with_openai_uses_gpt5_compatible_payload(monkeypatch):
     result = content_analysis_module._ocr_pdf_with_openai(b"%PDF-1.4 test")
 
     assert result == "Page 1:\nOctober 7 Open House"
-    assert captured["url"].endswith("/chat/completions")
-    assert captured["headers"]["Authorization"] == "Bearer test-key"
-    assert "temperature" not in captured["payload"]
-    assert "<output_contract>" in captured["payload"]["messages"][0]["content"][0]["text"]
-    assert (
-        captured["payload"]["messages"][0]["content"][1]["image_url"]["detail"]
-        == "high"
+    assert captured["model"] == "gpt-5-mini-2025-08-07"
+    assert captured["reasoning_effort"] == "medium"
+    assert captured["timeout_sec"] == 20
+
+
+def test_ocr_model_settings_can_store_responses():
+    import app.services.content_analysis as content_analysis_module
+
+    settings = content_analysis_module._ocr_model_settings(
+        model="gpt-5-mini-2025-08-07",
+        reasoning_effort="medium",
+        store_responses=True,
     )
+
+    assert settings.store is True
+
+
+def test_run_ocr_page_agent_threads_store_setting_into_agent_and_run_config(monkeypatch):
+    import app.services.content_analysis as content_analysis_module
+
+    captured = {}
+
+    class _FakeResult:
+        final_output = "OCR text"
+
+    def fake_run_sync(agent, input, run_config):
+        captured["agent_store"] = agent.model_settings.store
+        captured["run_config_store"] = run_config.model_settings.store
+        return _FakeResult()
+
+    monkeypatch.setattr(content_analysis_module.Runner, "run_sync", fake_run_sync)
+
+    result = content_analysis_module._run_ocr_page_agent(
+        data_url="data:image/png;base64,ZmFrZQ==",
+        model="gpt-5-mini-2025-08-07",
+        reasoning_effort="medium",
+        timeout_sec=20,
+        store_responses=True,
+        model_provider=object(),
+    )
+
+    assert result == "OCR text"
+    assert captured["agent_store"] is True
+    assert captured["run_config_store"] is True

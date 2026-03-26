@@ -1,0 +1,416 @@
+{% extends "base.html" %}
+
+{% block title %}LovelyChaos Setup{% endblock %}
+
+{% block extra_head %}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;0,700;1,400;1,600&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  /* ── Midnight Editorial: dark warm palette, Cormorant Garamond headings ── */
+  :root {
+    --lc-bg: #18120f;
+    --lc-bg-soft: #211812;
+    --lc-surface: #241a16;
+    --lc-surface-strong: #2c201b;
+    --lc-ink: #ede4d6;
+    --lc-ink-soft: #9c8878;
+    --lc-accent: hsl(8 72% 62%);
+    --lc-accent-soft: rgba(210, 90, 60, 0.18);
+    --lc-line: rgba(255,255,255,0.08);
+    --lc-line-strong: rgba(255,255,255,0.13);
+    --lc-success: hsl(146 50% 55%);
+    --lc-success-soft: rgba(80,180,110,0.14);
+    --lc-shadow-soft: 0 24px 60px rgba(0,0,0,0.55);
+    --lc-shadow-card: 0 8px 28px rgba(0,0,0,0.4);
+    --lc-font-serif: 'Cormorant Garamond', Georgia, serif;
+  }
+
+  body {
+    background: radial-gradient(ellipse at top left, rgba(180,60,40,0.12), transparent 40%),
+                radial-gradient(ellipse at bottom right, rgba(120,80,40,0.10), transparent 40%),
+                #18120f;
+    color: var(--lc-ink);
+  }
+
+  /* Sitebar dark */
+  .lc-sitebar {
+    background: rgba(22, 16, 12, 0.82);
+    border-bottom-color: rgba(255,255,255,0.08);
+  }
+  .lc-nav__link:hover,
+  .lc-nav__link.is-active {
+    background: rgba(255,255,255,0.07);
+    color: var(--lc-ink);
+  }
+
+  /* Hero dark */
+  .lc-hero {
+    background: linear-gradient(135deg, rgba(36,26,22,0.92), rgba(44,32,28,0.98));
+    border-color: rgba(255,255,255,0.09);
+  }
+
+  /* Cards dark */
+  .lc-card,
+  .lc-stat {
+    background: rgba(36, 26, 22, 0.85);
+    border-color: rgba(255,255,255,0.09);
+  }
+  .lc-card--tint {
+    background: linear-gradient(160deg, rgba(44,32,28,0.92), rgba(50,36,30,0.96));
+  }
+
+  /* Inputs dark */
+  .lc-input,
+  .lc-textarea,
+  .lc-select {
+    background: rgba(20,14,10,0.7);
+    border-color: rgba(255,255,255,0.11);
+    color: var(--lc-ink);
+  }
+  .lc-input[readonly] {
+    background: rgba(30,20,16,0.5);
+  }
+  .lc-input:focus,
+  .lc-textarea:focus {
+    border-color: var(--lc-accent);
+    box-shadow: 0 0 0 3px rgba(210,90,60,0.18);
+  }
+  .lc-input::placeholder,
+  .lc-textarea::placeholder {
+    color: rgba(156, 136, 120, 0.5);
+  }
+
+  /* Checks dark */
+  .lc-check {
+    background: rgba(28,20,16,0.7);
+    border-color: rgba(255,255,255,0.09);
+  }
+
+  /* Note dark */
+  .lc-note {
+    background: rgba(28,20,16,0.6);
+    color: var(--lc-ink-soft);
+  }
+  .lc-note strong { color: var(--lc-ink); }
+
+  /* Pill dark */
+  .lc-pill {
+    background: rgba(255,255,255,0.06);
+    border-color: rgba(255,255,255,0.1);
+    color: var(--lc-ink-soft);
+  }
+  .lc-pill--secondary {
+    background: rgba(255,255,255,0.04);
+    border-color: rgba(255,255,255,0.07);
+  }
+
+  /* Button dark — cream on dark */
+  .lc-button {
+    background: var(--lc-ink);
+    color: #18120f;
+  }
+  .lc-button--secondary {
+    background: transparent;
+    color: var(--lc-ink);
+    border-color: rgba(255,255,255,0.18);
+  }
+
+  /* List items dark */
+  .lc-list-item {
+    background: rgba(28,20,16,0.6);
+    border-color: rgba(255,255,255,0.08);
+  }
+  .lc-empty {
+    background: rgba(255,255,255,0.03);
+    border-color: rgba(255,255,255,0.08);
+    color: var(--lc-ink-soft);
+  }
+
+  /* School autocomplete dark */
+  .school-suggestions {
+    background: rgba(36,26,22,0.98);
+    border-color: rgba(255,255,255,0.12);
+  }
+  .school-suggestion:hover {
+    background: rgba(210,90,60,0.12);
+  }
+
+  /* ── Cormorant display headings — bigger, more dramatic ── */
+  .lc-display {
+    font-size: clamp(48px, 9vw, 88px);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    line-height: 0.92;
+  }
+  .lc-section-title {
+    font-size: clamp(30px, 4vw, 46px);
+    font-weight: 600;
+    letter-spacing: 0;
+  }
+
+  /* Gold card divider */
+  .v1-card-rule {
+    width: 40px;
+    height: 1px;
+    background: linear-gradient(90deg, var(--lc-accent), transparent);
+    margin-bottom: 20px;
+  }
+
+  /* Step tag — small gold label */
+  .v1-step-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .v1-step-tag__num {
+    font-family: var(--lc-font-serif);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--lc-accent);
+    letter-spacing: 0.06em;
+  }
+  .v1-step-tag__line {
+    width: 24px;
+    height: 1px;
+    background: var(--lc-accent);
+    opacity: 0.5;
+  }
+  .v1-step-tag__label {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--lc-ink-soft);
+  }
+
+  /* Orbs — darker tint */
+  .lc-orb--one { background: rgba(180,60,40,0.10); }
+  .lc-orb--two { background: rgba(140,90,50,0.12); }
+</style>
+{% endblock %}
+
+{% block hero %}
+  <section class="lc-hero">
+    <div class="lc-hero__copy">
+      <p class="lc-eyebrow">Family Setup</p>
+      <h1 class="lc-display">A calmer start<br><em>for a busy household.</em></h1>
+      <p class="lc-lead">Your calendar, your kids, your priorities — set once, handled from here.</p>
+      <div class="lc-pill-row">
+        <span class="lc-pill">Profile</span>
+        <span class="lc-pill">Kids + schools</span>
+        <span class="lc-pill">Calendar connection</span>
+      </div>
+    </div>
+    <div class="lc-hero__aside">
+      <a class="lc-button" href="/auth/google/start?household_id=1">Connect Google Calendar</a>
+      <a class="lc-button lc-button--secondary" href="/design-language">Open design language</a>
+    </div>
+  </section>
+{% endblock %}
+
+{% block page %}
+  <section class="lc-stack">
+    <article class="lc-card" id="step-1">
+      <div class="v1-step-tag">
+        <span class="v1-step-tag__num">01</span>
+        <span class="v1-step-tag__line"></span>
+        <span class="v1-step-tag__label">Family profile</span>
+      </div>
+      <div class="v1-card-rule"></div>
+      <h2 class="lc-section-title">Your details.</h2>
+      <p class="lc-intro" style="margin-bottom: 20px;">Capture the primary parent, default timezone, and phone context before routing starts.</p>
+      <form class="lc-form" method="post" action="/onboarding/profile/form">
+        <div class="lc-form-grid lc-form-grid--two">
+          <label class="lc-field">
+            <span class="lc-field__label">Admin email</span>
+            <input class="lc-input" name="admin_email" type="email" value="{{ profile.admin_email }}" required />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Admin phone</span>
+            <input class="lc-input" name="admin_phone" value="{{ profile.admin_phone }}" />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Timezone</span>
+            <input class="lc-input" id="timezone_value" name="timezone_value" value="{{ profile.timezone }}" readonly />
+          </label>
+        </div>
+        <p class="lc-note" id="school-timezone-status">Timezone is derived from the selected school when possible.</p>
+        <button class="lc-button" type="submit">Save family profile</button>
+      </form>
+    </article>
+
+    <article class="lc-card" id="step-2">
+      <div class="v1-step-tag">
+        <span class="v1-step-tag__num">02</span>
+        <span class="v1-step-tag__line"></span>
+        <span class="v1-step-tag__label">Kids and schools</span>
+      </div>
+      <div class="v1-card-rule"></div>
+      <h2 class="lc-section-title">Your children.</h2>
+      <p class="lc-intro" style="margin-bottom: 20px;">School context powers timezone resolution and helps LovelyChaos decide what matters to your household.</p>
+      <div class="lc-list">
+        {% for child in children %}
+          <div class="lc-list-item">
+            <div>
+              <p class="lc-list-item__title">{{ child.name }}</p>
+              <p class="lc-list-item__meta">{{ child.school_name }}{% if child.grade %} &middot; {{ child.grade }}{% endif %}</p>
+            </div>
+          </div>
+        {% else %}
+          <p class="lc-empty">No children added yet.</p>
+        {% endfor %}
+      </div>
+      <form class="lc-form" method="post" action="/onboarding/children/form" style="margin-top: 18px;">
+        <div class="lc-form-grid lc-form-grid--two">
+          <label class="lc-field">
+            <span class="lc-field__label">Child name</span>
+            <input class="lc-input" name="name" placeholder="Child name" required />
+          </label>
+          <label class="lc-field">
+            <span class="lc-field__label">Grade</span>
+            <input class="lc-input" name="grade" placeholder="Grade" />
+          </label>
+        </div>
+        <label class="lc-field">
+          <span class="lc-field__label">School</span>
+          <span class="school-autocomplete">
+            <input class="lc-input" name="school_name" placeholder="School" required autocomplete="off" data-school-autocomplete />
+            <div class="school-suggestions" data-school-suggestions></div>
+          </span>
+        </label>
+        <button class="lc-button" type="submit">Add child</button>
+      </form>
+    </article>
+
+    <article class="lc-card" id="step-3">
+      <div class="v1-step-tag">
+        <span class="v1-step-tag__num">03</span>
+        <span class="v1-step-tag__line"></span>
+        <span class="v1-step-tag__label">Digests</span>
+      </div>
+      <div class="v1-card-rule"></div>
+      <h2 class="lc-section-title">Your cadence.</h2>
+      <p class="lc-intro" style="margin-bottom: 20px;">Choose how often LovelyChaos sends slower-moving family summaries.</p>
+      <form class="lc-form" method="post" action="/onboarding/settings/form">
+        <label class="lc-check">
+          <input type="checkbox" name="daily_summary_enabled" {% if settings.daily_summary_enabled %}checked{% endif %} />
+          <span>
+            <span class="lc-check__title">Enable daily summary</span>
+            <span class="lc-check__copy">Collect informational updates into a single daily digest.</span>
+          </span>
+        </label>
+        <label class="lc-check">
+          <input type="checkbox" name="weekly_digest_enabled" {% if settings.weekly_digest_enabled %}checked{% endif %} />
+          <span>
+            <span class="lc-check__title">Enable weekly digest</span>
+            <span class="lc-check__copy">Use a weekly summary for slower-moving logistics and reminders.</span>
+          </span>
+        </label>
+        <button class="lc-button" type="submit">Save digest settings</button>
+      </form>
+    </article>
+
+    <article class="lc-card" id="step-4">
+      <div class="v1-step-tag">
+        <span class="v1-step-tag__num">04</span>
+        <span class="v1-step-tag__line"></span>
+        <span class="v1-step-tag__label">Priority profile</span>
+      </div>
+      <div class="v1-card-rule"></div>
+      <h2 class="lc-section-title">What matters.</h2>
+      <p class="lc-intro" style="margin-bottom: 20px;">System defaults keep the basics on, while your custom priorities teach LovelyChaos what this household cares about.</p>
+      <form class="lc-form" method="post" action="/onboarding/preferences/form">
+        <div>
+          <p class="lc-field__label">System default priorities</p>
+          {% for item in prefs.system_defaults %}
+            <label class="lc-check">
+              <input type="checkbox" name="system_default_{{ item.key }}" {% if item.enabled %}checked{% endif %} />
+              <span>
+                <span class="lc-check__title">{{ item.label }}</span>
+                <span class="lc-check__copy">{{ item.description }} Examples: {{ item.examples | join(', ') }}.</span>
+              </span>
+            </label>
+          {% endfor %}
+        </div>
+        <label class="lc-field">
+          <span class="lc-field__label">What matters to your household?</span>
+          <span class="lc-note">Type naturally — positives and negatives both welcome. E.g. Pizza days, hot lunch, I don't care about cultural days.</span>
+          <textarea class="lc-textarea" name="raw_text">{{ prefs.raw_text }}</textarea>
+        </label>
+        {% if prefs.preference_parse_status == "error" %}
+          <div class="lc-note" style="border: 1px solid rgba(210,90,60,0.3); background: rgba(210,90,60,0.1); color: #e8a090;">
+            <strong>Saved your notes, but LovelyChaos could not interpret them right now.</strong>
+          </div>
+        {% elif prefs.raw_text.strip() %}
+          {% if prefs.parsed_priority_topics or prefs.suppressed_priority_topics %}
+            <div class="lc-note" style="border: 1px solid rgba(80,180,110,0.2); background: rgba(80,180,110,0.08);">
+              <strong>LovelyChaos interpreted your notes successfully.</strong>
+            </div>
+          {% else %}
+            <div class="lc-note">
+              <strong>Saved, but nothing specific enough to turn into preferences yet.</strong>
+            </div>
+          {% endif %}
+        {% endif %}
+        <div class="lc-stack" style="gap: 12px;">
+          <div>
+            <p class="lc-field__label">Interpreted as important</p>
+            <div class="lc-pill-row">
+              {% for topic in prefs.parsed_priority_topics %}<span class="lc-pill">{{ topic }}</span>
+              {% else %}<span class="lc-pill">No interpreted positive preferences yet</span>{% endfor %}
+            </div>
+          </div>
+          <div>
+            <p class="lc-field__label">Interpreted as less important</p>
+            <div class="lc-pill-row">
+              {% for topic in prefs.suppressed_priority_topics %}<span class="lc-pill lc-pill--secondary">{{ topic }}</span>
+              {% else %}<span class="lc-pill lc-pill--secondary">No interpreted negative preferences yet</span>{% endfor %}
+            </div>
+          </div>
+        </div>
+        <button class="lc-button" type="submit">Save priority profile</button>
+      </form>
+    </article>
+
+    <article class="lc-card lc-card--tint" id="step-5">
+      <div class="v1-step-tag">
+        <span class="v1-step-tag__num">05</span>
+        <span class="v1-step-tag__line"></span>
+        <span class="v1-step-tag__label">Google Calendar</span>
+      </div>
+      <div class="v1-card-rule"></div>
+      <h2 class="lc-section-title">Connect everything.</h2>
+      <p class="lc-intro" style="margin-bottom: 20px;">Once the calendar is connected, the assistant can move from triage into direct scheduling.</p>
+      <div class="lc-actions">
+        <a class="lc-button" href="/auth/google/start?household_id=1">Connect Google Calendar</a>
+      </div>
+      <p class="lc-note" style="margin-top: 16px;">After connecting, send real email to <strong>schedule@lovelychaos.ca</strong> once inbound provider forwarding is configured.</p>
+    </article>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (() => {
+    const schoolInputs = document.querySelectorAll('[data-school-autocomplete]');
+    const timezoneInput = document.getElementById('timezone_value');
+    const status = document.getElementById('school-timezone-status');
+    const cachedMatches = new Map();
+    let activeContainer = null;
+    async function fetchMatches(q) { const r = await fetch(`/admin/schools/search?q=${encodeURIComponent(q)}`); if (!r.ok) return []; return (await r.json()).results || []; }
+    async function resolveSchool(n) { const r = await fetch(`/admin/schools/resolve?name=${encodeURIComponent(n)}`); if (!r.ok) return null; return r.json(); }
+    function clearSuggestions(c) { if (!c) return; c.innerHTML = ''; c.classList.remove('is-open'); }
+    function renderMatches(c, matches) { clearSuggestions(c); cachedMatches.clear(); for (const m of matches) { const o = document.createElement('div'); o.className = 'school-suggestion'; o.dataset.schoolName = m.school_name; o.innerHTML = `<strong>${m.school_name}</strong><small>${m.city} - ${m.board_name}</small>`; c.appendChild(o); cachedMatches.set(m.school_name.toLowerCase(), m); } if (matches.length) { c.classList.add('is-open'); activeContainer = c; } }
+    async function updateTimezone(n) { if (!n) return; const cached = cachedMatches.get(n.toLowerCase()); const resolved = cached || await resolveSchool(n); if (!resolved) { status.textContent = 'School not found in GTA list.'; return; } timezoneInput.value = resolved.timezone || timezoneInput.value; status.textContent = `Timezone set to ${resolved.timezone}${resolved.city ? ` (${resolved.city})` : ''}.`; }
+    for (const input of schoolInputs) {
+      const container = input.parentElement.querySelector('[data-school-suggestions]');
+      input.addEventListener('input', async (e) => { const q = e.target.value.trim(); if (q.length < 2) { clearSuggestions(container); return; } renderMatches(container, await fetchMatches(q)); });
+      input.addEventListener('change', (e) => updateTimezone(e.target.value.trim()));
+      input.addEventListener('blur', () => { window.setTimeout(() => clearSuggestions(container), 150); });
+      container.addEventListener('mousedown', (e) => { const o = e.target.closest('.school-suggestion'); if (!o) return; input.value = o.dataset.schoolName || ''; clearSuggestions(container); updateTimezone(input.value.trim()); });
+    }
+    document.addEventListener('mousedown', (e) => { if (activeContainer && !e.target.closest('.school-autocomplete')) { clearSuggestions(activeContainer); activeContainer = null; } });
+  })();
+</script>
+{% endblock %}

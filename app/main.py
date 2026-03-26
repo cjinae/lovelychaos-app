@@ -1,18 +1,21 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import asynccontextmanager, contextmanager, nullcontext
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import base64
-from email.utils import parsedate_to_datetime
+from email.utils import parseaddr, parsedate_to_datetime
 from html import unescape
 import hashlib
 import hmac
 import json
+import os
 import re
 from urllib.parse import urlencode
 import uuid
-from typing import Optional
+from typing import Any, Iterator, Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request
@@ -20,6 +23,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import httpx
+from starlette.concurrency import run_in_threadpool
 from svix.webhooks import Webhook, WebhookVerificationError
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError
@@ -42,8 +46,9 @@ from app.models import (
     InformationalItem,
     NotificationDelivery,
     Operation,
-    PendingEvent,
+    TeacherContact,
     Reminder,
+    SmsConversationState,
     PreferenceProfile,
     SourceMessage,
     User,
@@ -66,6 +71,17 @@ from app.schemas import (
 )
 from app.services.attribution import resolve_admin_phone, resolve_admin_sender
 from app.services.auto_add import evaluate_auto_add_candidate
+from app.services.agent_threads import (
+    build_email_reply_headers,
+    email_session_id,
+    extract_header_value,
+    load_thread_documents,
+    persist_thread_documents,
+    queue_session_message,
+    resolve_email_thread_key,
+    sms_session_id,
+)
+from app.services.add_requests import extract_context_documents, resolve_add_request_from_context
 from app.services.calendar import (
     CalendarMutationError,
     CalendarProvider,
@@ -75,23 +91,35 @@ from app.services.calendar import (
 from app.services.brief_summary import build_brief_summary
 from app.services.content_analysis import (
     AnalysisChunk,
+    DownloadedAttachment,
     build_prioritized_chunks,
     build_analysis_text,
     dedupe_extracted_events,
     extract_candidate_links,
+    maybe_extract_pdf_text,
     resolve_and_download_links,
 )
-from app.services.expiry import expire_pending_events
 from app.services.digests import build_daily_summary, build_weekly_digest
 from app.services.followups import (
+    FollowupMatch,
+    assess_more_info_context,
     build_more_info_message,
+    load_active_sms_conversation_state,
     load_active_followup_context,
+    load_recent_followup_contexts,
     persist_followup_context,
+    persist_sms_conversation_state,
+    resolve_candidate_items,
+    resolve_followup_candidates,
     resolve_followup_item,
     resolve_response_channel,
+    resolve_sms_conversation_state,
+    retrieve_more_info_source_snippets,
+    select_more_info_snippets,
 )
 from app.services.google_auth import GoogleAuthError, refresh_google_access_token, should_refresh_token
-from app.services.llm import ExtractedEvent, MockDecisionEngine, OpenAIDecisionEngine
+from app.services.llm import CommandToolRuntime, ExtractedEvent, MockDecisionEngine, OpenAIDecisionEngine
+from app.services.openai_tracing import configure_openai_tracing, current_trace_context, request_trace_context
 from app.services.operations import NotificationSender, process_operation
 from app.services.notifications import (
     MockNotificationProvider,
@@ -102,8 +130,10 @@ from app.services.notifications import (
 from app.services.priorities import (
     ensure_priority_rules,
     load_priority_preferences,
+    priority_topic_catalog,
     save_command_written_preference,
     save_priority_preferences,
+    topic_matches_text,
 )
 from app.services.retention import purge_old_records
 from app.services.relevancy import compute_relevancy_evidence
@@ -127,16 +157,35 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="LovelyChaos", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+configure_openai_tracing(api_key=settings.openai_api_key, enabled=settings.openai_tracing_enabled)
+_CURRENT_CONVERSATION_SESSION_ID: ContextVar[str | None] = ContextVar(
+    "lovelychaos_current_conversation_session_id",
+    default=None,
+)
+_CURRENT_EMAIL_REPLY_HEADERS: ContextVar[dict[str, str] | None] = ContextVar(
+    "lovelychaos_current_email_reply_headers",
+    default=None,
+)
+
+
+def _agent_db_session_factory() -> Session:
+    return Session(bind=engine)
+
+
 engine_llm = (
     OpenAIDecisionEngine(
         api_key=settings.openai_api_key,
         model=settings.openai_model,
+        reasoning_effort=settings.openai_reasoning_effort,
         timeout_sec=settings.openai_timeout_sec,
         base_url=settings.openai_base_url,
+        store_responses=settings.openai_store_responses,
+        db_session_factory=_agent_db_session_factory,
     )
     if settings.llm_mode == "openai"
     else MockDecisionEngine()
 )
+
 notifier = NotificationSender()
 calendar_provider: CalendarProvider = (
     GoogleCalendarHttpProvider(settings.google_calendar_timeout_sec)
@@ -155,6 +204,34 @@ notification_provider = (
     if settings.notification_mode == "live"
     else MockNotificationProvider()
 )
+APP_BOOTED_AT = datetime.now(timezone.utc)
+
+_TRACED_HTTP_WORKFLOWS = {
+    "/webhooks/email/inbound": "lovelychaos.email_inbound",
+    "/webhooks/resend/inbound": "lovelychaos.resend_inbound",
+    "/webhooks/sms/inbound": "lovelychaos.sms_inbound",
+    "/webhooks/twilio/sms": "lovelychaos.twilio_sms_inbound",
+    "/internal/operations/{operation_id}/run": "lovelychaos.run_operation",
+}
+
+
+@app.middleware("http")
+async def _openai_trace_requests(request: Request, call_next):
+    if not getattr(settings, "openai_tracing_enabled", True):
+        return await call_next(request)
+    route = request.scope.get("route")
+    route_path = route.path if route is not None else None
+    workflow_name = _TRACED_HTTP_WORKFLOWS.get(route_path or request.url.path)
+    if not workflow_name:
+        return await call_next(request)
+    metadata = {
+        "method": request.method,
+        "path": request.url.path,
+        "query": request.url.query or None,
+    }
+    group_id = request.headers.get("x-svix-id") or request.headers.get("x-request-id") or None
+    with request_trace_context(workflow_name=workflow_name, group_id=group_id, metadata=metadata):
+        return await call_next(request)
 
 
 def _display_subject(subject: str) -> str:
@@ -234,6 +311,10 @@ def _normalize_preface_text(value: str) -> str:
             break
         if re.match(r"^sent from my\b", line, flags=re.IGNORECASE):
             break
+        if re.match(r"^on .+ wrote:\s*$", line, flags=re.IGNORECASE):
+            break
+        if line.startswith(">"):
+            break
         if re.match(r"^(from|date|subject|to):", line, flags=re.IGNORECASE):
             continue
         lines.append(line)
@@ -245,6 +326,8 @@ def _find_forward_boundary(lines: list[str]) -> Optional[int]:
         line = raw_line.strip()
         if not line:
             continue
+        if re.match(r"^on .+ wrote:\s*$", line, flags=re.IGNORECASE):
+            return idx
         if re.match(r"^-+\s*forwarded message\s*-+$", line, flags=re.IGNORECASE):
             return idx
         if re.match(r"^begin forwarded message:", line, flags=re.IGNORECASE):
@@ -353,7 +436,7 @@ def _email_intent_metadata(intent: EmailIntentClassification) -> dict:
 
 def _should_accept_plain_email_command(command: dict) -> bool:
     action = str(command.get("action") or "none").strip().lower()
-    if action not in {"add", "more_info", "delete", "remind", "set_preference"}:
+    if action not in {"add", "more_info", "update", "delete", "remind", "set_preference"}:
         return False
     strategy = _command_execution_strategy(command)
     if not _command_strategy_matches_action(action, strategy):
@@ -374,7 +457,7 @@ def _should_accept_plain_email_command(command: dict) -> bool:
 
 def _should_accept_forwarded_command(intent: dict) -> bool:
     action = str(intent.get("action") or "none").strip().lower()
-    if action not in {"add", "more_info", "delete", "remind", "set_preference"}:
+    if action not in {"add", "more_info", "update", "delete", "remind", "set_preference"}:
         return False
     strategy = _command_execution_strategy(intent)
     if not _command_strategy_matches_action(action, strategy):
@@ -389,12 +472,21 @@ def _should_accept_forwarded_command(intent: dict) -> bool:
     return True
 
 
+def _should_prefer_direct_preface_command(command: Optional[dict]) -> bool:
+    if not command or not _should_accept_plain_email_command(command):
+        return False
+    action = str(command.get("action") or "none").strip().lower()
+    if action in {"more_info", "set_preference"}:
+        return True
+    return bool(str(command.get("topic") or "").strip())
+
+
 def _command_execution_strategy(command: dict) -> str:
     strategy = str(command.get("execution_strategy") or "").strip().lower()
     if strategy in {"deterministic", "semantic", "none"}:
         return strategy
     action = str(command.get("action") or "none").strip().lower()
-    if action in {"add", "delete", "remind", "set_preference"}:
+    if action in {"add", "update", "delete", "remind", "set_preference"}:
         return "deterministic"
     if action == "more_info":
         return "semantic"
@@ -402,11 +494,608 @@ def _command_execution_strategy(command: dict) -> str:
 
 
 def _command_strategy_matches_action(action: str, strategy: str) -> bool:
-    if action in {"add", "delete", "remind", "set_preference"}:
+    if action in {"add", "update", "delete", "remind", "set_preference"}:
         return strategy == "deterministic"
     if action == "more_info":
         return strategy == "semantic"
     return strategy == "none"
+
+
+def _tool_status_to_webhook(status: str) -> WebhookStatus:
+    mapping = {
+        "command_completed": WebhookStatus.COMMAND_COMPLETED,
+        "command_needs_clarification": WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+        "command_noop_past_event": WebhookStatus.COMMAND_NOOP_PAST_EVENT,
+    }
+    return mapping.get(status, WebhookStatus.COMMAND_NEEDS_CLARIFICATION)
+
+
+def _parse_iso_or_none(value: str | None) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _matches_query_text(title: str, query: str) -> bool:
+    normalized_title = _compact_text(title)
+    normalized_query = _compact_text(query)
+    if not normalized_query:
+        return False
+    if normalized_query in normalized_title:
+        return True
+    tokens = _command_topic_tokens(query)
+    return bool(tokens) and all(token in normalized_title for token in tokens)
+
+
+def _resolve_household_event_match(
+    db: Session,
+    *,
+    household_id: int,
+    event_id: int | None = None,
+    query: str | None = None,
+) -> tuple[Optional[Event], bool]:
+    if event_id is not None:
+        event = db.scalar(select(Event).where(Event.id == event_id, Event.household_id == household_id))
+        return event, False
+
+    normalized_query = str(query or "").strip()
+    if not normalized_query:
+        return None, False
+
+    candidates = [
+        event
+        for event in list(
+            db.scalars(
+                select(Event)
+                .where(Event.household_id == household_id)
+                .order_by(Event.start_at.asc(), Event.id.asc())
+            )
+        )
+        if event.status != "deleted" and _matches_query_text(event.title or "", normalized_query)
+    ]
+    if not candidates:
+        return None, False
+    if len(candidates) > 1:
+        return None, True
+    return candidates[0], False
+
+
+def _serialize_tool_event(event: Event) -> dict[str, Any]:
+    return {
+        "event_id": event.id,
+        "title": event.title,
+        "start_at": _serialize_dt(event.start_at),
+        "end_at": _serialize_dt(event.end_at),
+        "all_day": bool(event.all_day),
+        "status": event.status,
+        "calendar_event_id": event.calendar_event_id,
+        "source": "stored_event",
+    }
+
+
+def _serialize_followup_tool_item(item: dict, timezone_name: str) -> Optional[dict[str, Any]]:
+    candidate = _candidate_from_followup_item(item, timezone_name)
+    if candidate is None:
+        return None
+    return {
+        "event_id": None,
+        "title": candidate.title,
+        "start_at": _serialize_dt(candidate.start_at),
+        "end_at": _serialize_dt(candidate.end_at),
+        "all_day": False,
+        "status": "followup_context",
+        "calendar_event_id": None,
+        "source": "followup_context",
+        "item_id": item.get("item_id"),
+    }
+
+
+def _build_command_tool_runtime(
+    *,
+    db: Session,
+    request_id: str,
+    user: User,
+    source: SourceMessage,
+    provider_message_id: str,
+    subject: str,
+    raw_message_text: str,
+    analysis_message_text: str,
+    forwarded_subject: str,
+    forwarded_date: str,
+    response_channel: str,
+) -> CommandToolRuntime:
+    def read_preferences() -> dict[str, Any]:
+        prefs = load_priority_preferences(db, user.household_id)
+        return {
+            "ok": True,
+            "status": "command_completed",
+            "message": "Loaded preferences.",
+            "raw_text": prefs.get("raw_text") or "",
+            "user_priority_topics": list(prefs.get("user_priority_topics") or []),
+            "suppressed_priority_topics": list(prefs.get("effective_suppressed_priority_topics") or []),
+            "command_written_preferences": list(prefs.get("command_written_preferences") or []),
+        }
+
+    def update_preference(topic: str, behavior: str, reason: str) -> dict[str, Any]:
+        if not topic or behavior not in {"auto_add", "mention", "suppress"}:
+            return {
+                "ok": False,
+                "status": "command_needs_clarification",
+                "message": "Tell me which topic to change and whether I should auto-add it, mention it, or suppress it.",
+                "mutation_executed": False,
+            }
+        save_command_written_preference(
+            db,
+            household_id=user.household_id,
+            topic=topic,
+            behavior=behavior,
+        )
+        db.commit()
+        behavior_text = {
+            "auto_add": "I'll always add that when I can.",
+            "mention": "I'll keep mentioning that in future updates.",
+            "suppress": "I won't include updates about that unless you change the preference.",
+        }[behavior]
+        return {
+            "ok": True,
+            "status": "command_completed",
+            "message": f"Saved preference for {topic.strip()}. {behavior_text}",
+            "mutation_executed": True,
+            "reason": reason,
+        }
+
+    def search_calendar(query: str, from_iso: str | None, to_iso: str | None, limit: int) -> dict[str, Any]:
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        if query:
+            active_context = load_active_followup_context(
+                db,
+                household_id=user.household_id,
+                response_channel=response_channel,
+                thread_or_conversation_key=_followup_context_key(source),
+            )
+            contexts = [active_context] if active_context is not None else []
+            contexts.extend(load_recent_followup_contexts(db, household_id=user.household_id, limit=3))
+            for context in contexts:
+                if context is None:
+                    continue
+                for match in resolve_followup_candidates(context, query_text=query):
+                    payload = _serialize_followup_tool_item(match.item, user.timezone)
+                    if payload is None:
+                        continue
+                    dedupe_key = json.dumps([payload.get("title"), payload.get("start_at"), payload.get("source")])
+                    if dedupe_key in seen:
+                        continue
+                    seen.add(dedupe_key)
+                    items.append(payload)
+        from_dt = _parse_iso_or_none(from_iso)
+        to_dt = _parse_iso_or_none(to_iso)
+        for event in list(
+            db.scalars(
+                select(Event)
+                .where(Event.household_id == user.household_id)
+                .order_by(Event.start_at.asc(), Event.id.asc())
+            )
+        ):
+            if event.status == "deleted":
+                continue
+            if query and not _matches_query_text(event.title or "", query):
+                continue
+            if from_dt and event.end_at < from_dt:
+                continue
+            if to_dt and event.start_at > to_dt:
+                continue
+            payload = _serialize_tool_event(event)
+            dedupe_key = json.dumps([payload.get("title"), payload.get("start_at"), payload.get("source")])
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            items.append(payload)
+        try:
+            credential, binding = _resolve_calendar_context_with_refresh(db, user.household_id)
+            remote_items = calendar_provider.find_events(
+                access_token=credential.access_token,
+                calendar_id=binding.calendar_id,
+                query=query,
+                time_min=from_dt,
+                time_max=to_dt,
+                max_results=limit,
+            )
+            for event in remote_items:
+                payload = {
+                    "event_id": None,
+                    "title": event.title,
+                    "start_at": _serialize_dt(event.start_at),
+                    "end_at": _serialize_dt(event.end_at),
+                    "all_day": bool(event.all_day),
+                    "status": "google_calendar",
+                    "calendar_event_id": event.calendar_event_id,
+                    "source": "google_calendar",
+                }
+                dedupe_key = json.dumps([payload.get("title"), payload.get("start_at"), payload.get("source")])
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                items.append(payload)
+        except Exception:
+            pass
+        return {
+            "ok": bool(items),
+            "status": "command_completed" if items else "command_needs_clarification",
+            "message": "Matches found." if items else "I couldn't find a matching event.",
+            "items": items[: max(1, min(limit, 10))],
+        }
+
+    def add_calendar_event_from_context(query: str | None, title: str | None, start_at_iso: str | None, end_at_iso: str | None, all_day: bool) -> dict[str, Any]:
+        active_context = load_active_followup_context(
+            db,
+            household_id=user.household_id,
+            response_channel=response_channel,
+            thread_or_conversation_key=_followup_context_key(source),
+        )
+        explicit_candidate: Optional[ExtractedEvent] = None
+        if title and start_at_iso and end_at_iso:
+            explicit_candidate = ExtractedEvent(
+                title=title.strip(),
+                start_at=_parse_iso_or_none(start_at_iso),
+                end_at=_parse_iso_or_none(end_at_iso),
+                category="command",
+                confidence=0.95,
+                model_reason="tool_explicit_event",
+            )
+
+        priority_preferences = load_priority_preferences(db, user.household_id)
+        reference_datetime_hint = _serialize_dt(_parse_forwarded_reference_datetime(forwarded_date, user.timezone)) or ""
+        extraction_result = extract_context_documents(
+            content_body_text=analysis_message_text or raw_message_text,
+            reference_datetime_hint=reference_datetime_hint,
+        )
+        result = resolve_add_request_from_context(
+            raw_body_text=query or raw_message_text,
+            subject=subject,
+            timezone_name=user.timezone,
+            response_channel=response_channel,
+            command_topic=query,
+            followup_context=active_context,
+            forwarded_subject=forwarded_subject,
+            forwarded_date=forwarded_date,
+            preference_text=priority_preferences["raw_text"],
+            explicit_candidate=explicit_candidate,
+            extraction_result=extraction_result,
+            fallback_command_topic_fn=_fallback_command_topic,
+            extract_direct_add_candidate_fn=_extract_direct_add_candidate,
+            candidate_from_followup_item_fn=_candidate_from_followup_item,
+            resolve_forwarded_add_candidates_fn=_resolve_forwarded_add_candidates,
+            collect_extraction_results_fn=_collect_extraction_results,
+            validate_candidate_fn=validate_candidate,
+            serialize_dt_fn=_serialize_dt,
+            build_candidate_clarification_fn=_build_candidate_clarification,
+            build_past_event_message_fn=_build_past_event_message,
+            past_only_candidates_fn=_past_only_candidates,
+            allows_multiple_add_fn=_allows_multiple_add,
+            create_candidate_event_fn=lambda candidate: _create_event_from_candidate_result(
+                db=db,
+                request_id=request_id,
+                user=user,
+                source=source,
+                provider_message_id=provider_message_id,
+                candidate=candidate,
+                all_day_override=True if all_day else None,
+            ),
+        )
+        return {
+            "ok": result.status == "command_completed",
+            "status": result.status,
+            "message": result.message,
+            "mutation_executed": result.mutation_executed,
+            "candidate_choices": result.candidate_choices,
+            "created_event_ids": result.created_event_ids,
+            "created_titles": result.created_titles,
+        }
+
+    def update_calendar_event(
+        event_id: int | None,
+        query: str | None,
+        title: str | None,
+        location: str | None,
+        start_at_iso: str | None,
+        end_at_iso: str | None,
+        all_day: bool | None,
+    ) -> dict[str, Any]:
+        event, ambiguous = _resolve_household_event_match(db, household_id=user.household_id, event_id=event_id, query=query)
+        if ambiguous:
+            return {
+                "ok": False,
+                "status": "command_needs_clarification",
+                "message": "I found more than one matching calendar event. Please be more specific.",
+                "mutation_executed": False,
+            }
+        if event is None:
+            return {
+                "ok": False,
+                "status": "command_needs_clarification",
+                "message": "I couldn't find that event to update.",
+                "mutation_executed": False,
+            }
+        if not event.calendar_event_id:
+            return {
+                "ok": False,
+                "status": "command_needs_clarification",
+                "message": "That event is not linked to Google Calendar.",
+                "mutation_executed": False,
+            }
+        if not any([title, location, start_at_iso, end_at_iso, all_day is not None]):
+            return {
+                "ok": False,
+                "status": "command_needs_clarification",
+                "message": "Tell me what you want to change about that event.",
+                "mutation_executed": False,
+            }
+        gate_response = _tenant_gate_for_calendar_mutation(db, request_id, user.household_id, event.household_id)
+        if gate_response is not None:
+            return {
+                "ok": False,
+                "status": gate_response.status,
+                "message": gate_response.message,
+                "mutation_executed": False,
+            }
+        start_at = _parse_iso_or_none(start_at_iso) if start_at_iso else None
+        end_at = _parse_iso_or_none(end_at_iso) if end_at_iso else None
+        try:
+            credential, binding = _resolve_calendar_context_with_refresh(db, user.household_id)
+            calendar_provider.update_event(
+                access_token=credential.access_token,
+                calendar_id=binding.calendar_id,
+                calendar_event_id=event.calendar_event_id,
+                title=title,
+                start_at=start_at or event.start_at,
+                end_at=end_at or event.end_at,
+                timezone=user.timezone,
+                all_day=event.all_day if all_day is None else all_day,
+                location=location,
+            )
+        except CalendarMutationError:
+            return {
+                "ok": False,
+                "status": "command_needs_clarification",
+                "message": "I couldn't update that event in Google Calendar right now. Please try again.",
+                "mutation_executed": False,
+            }
+        if title:
+            event.title = title
+        if start_at:
+            event.start_at = start_at
+        if end_at:
+            event.end_at = end_at
+        if all_day is not None:
+            event.all_day = all_day
+        event.version += 1
+        db.commit()
+        return {
+            "ok": True,
+            "status": "command_completed",
+            "message": "Updated calendar event.",
+            "mutation_executed": True,
+            "event_id": event.id,
+        }
+
+    def delete_calendar_event(event_id: int | None, query: str | None) -> dict[str, Any]:
+        event, ambiguous = _resolve_household_event_match(db, household_id=user.household_id, event_id=event_id, query=query)
+        if ambiguous:
+            return {
+                "ok": False,
+                "status": "command_needs_clarification",
+                "message": "I found more than one matching event. Please be more specific.",
+                "mutation_executed": False,
+            }
+        if event is None:
+            return {
+                "ok": False,
+                "status": "command_needs_clarification",
+                "message": "Event not found.",
+                "mutation_executed": False,
+            }
+        if not event.calendar_event_id:
+            return {
+                "ok": False,
+                "status": "command_needs_clarification",
+                "message": "Event is not linked to Google Calendar.",
+                "mutation_executed": False,
+            }
+        gate_response = _tenant_gate_for_calendar_mutation(db, request_id, user.household_id, event.household_id)
+        if gate_response is not None:
+            return {
+                "ok": False,
+                "status": gate_response.status,
+                "message": gate_response.message,
+                "mutation_executed": False,
+            }
+        try:
+            credential, binding = _resolve_calendar_context_with_refresh(db, user.household_id)
+            calendar_provider.delete_event(
+                access_token=credential.access_token,
+                calendar_id=binding.calendar_id,
+                calendar_event_id=event.calendar_event_id,
+            )
+        except CalendarMutationError:
+            return {
+                "ok": False,
+                "status": "command_needs_clarification",
+                "message": "Unable to delete event from calendar. Please try again.",
+                "mutation_executed": False,
+            }
+        event.status = "deleted"
+        event.version += 1
+        db.commit()
+        return {
+            "ok": True,
+            "status": "command_completed",
+            "message": "Event deleted",
+            "mutation_executed": True,
+            "event_id": event.id,
+        }
+
+    def set_calendar_reminder(event_id: int | None, query: str | None, minutes_before: int, reminder_channel: str) -> dict[str, Any]:
+        event, ambiguous = _resolve_household_event_match(db, household_id=user.household_id, event_id=event_id, query=query)
+        if ambiguous:
+            return {
+                "ok": False,
+                "status": "command_needs_clarification",
+                "message": "I found more than one matching event. Please be more specific.",
+                "mutation_executed": False,
+            }
+        if event is None:
+            return {
+                "ok": False,
+                "status": "command_needs_clarification",
+                "message": "Event not found.",
+                "mutation_executed": False,
+            }
+        gate = _tenant_gate_for_calendar_mutation(db, request_id, user.household_id, event.household_id)
+        if gate is not None:
+            return {
+                "ok": False,
+                "status": gate.status,
+                "message": gate.message,
+                "mutation_executed": False,
+            }
+        trigger_at = _safe_utc(event.start_at) - timedelta(minutes=int(minutes_before or 60))
+        now = datetime.now(timezone.utc)
+        if trigger_at <= now:
+            return {
+                "ok": False,
+                "status": "command_needs_clarification",
+                "message": "Reminder time is in the past. Please choose a different reminder time.",
+                "mutation_executed": False,
+            }
+        if reminder_channel == "calendar":
+            if not event.calendar_event_id:
+                return {
+                    "ok": False,
+                    "status": "command_needs_clarification",
+                    "message": "Event is not linked to Google Calendar.",
+                    "mutation_executed": False,
+                }
+            try:
+                credential, binding = _resolve_calendar_context_with_refresh(db, user.household_id)
+                calendar_provider.set_event_reminder(
+                    access_token=credential.access_token,
+                    calendar_id=binding.calendar_id,
+                    calendar_event_id=event.calendar_event_id,
+                    minutes_before=int(minutes_before or 60),
+                )
+            except CalendarMutationError:
+                return {
+                    "ok": False,
+                    "status": "command_needs_clarification",
+                    "message": "Unable to set calendar reminder right now.",
+                    "mutation_executed": False,
+                }
+        db.add(
+            Reminder(
+                household_id=user.household_id,
+                event_id=event.id,
+                channel=reminder_channel,
+                trigger_at=trigger_at,
+                timezone=user.timezone,
+                status="scheduled",
+            )
+        )
+        db.commit()
+        return {
+            "ok": True,
+            "status": "command_completed",
+            "message": "Reminder set.",
+            "mutation_executed": True,
+            "event_id": event.id,
+        }
+
+    return CommandToolRuntime(
+        household_id=user.household_id,
+        response_channel=response_channel,
+        timezone_name=user.timezone,
+        current_message=raw_message_text,
+        read_preferences=read_preferences,
+        update_preference=update_preference,
+        search_calendar=search_calendar,
+        add_calendar_event_from_context=add_calendar_event_from_context,
+        update_calendar_event=update_calendar_event,
+        delete_calendar_event=delete_calendar_event,
+        set_calendar_reminder=set_calendar_reminder,
+        notes={"request_id": request_id, "provider_message_id": provider_message_id},
+    )
+
+
+def _run_command_tools(
+    *,
+    db: Session,
+    request_id: str,
+    user: User,
+    source: SourceMessage,
+    receipt: WebhookReceipt,
+    response_channel: str,
+    response_subject: str,
+    provider_message_id: str,
+    subject: str,
+    raw_message_text: str,
+    analysis_message_text: str,
+    forwarded_subject: str = "",
+    forwarded_date: str = "",
+    command: dict,
+    allow_add_fallback: bool = False,
+) -> Optional[InboundResponse]:
+    execute = getattr(engine_llm, "execute_command_with_tools", None)
+    if not callable(execute):
+        return None
+    runtime = _build_command_tool_runtime(
+        db=db,
+        request_id=request_id,
+        user=user,
+        source=source,
+        provider_message_id=provider_message_id,
+        subject=subject,
+        raw_message_text=raw_message_text,
+        analysis_message_text=analysis_message_text,
+        forwarded_subject=forwarded_subject,
+        forwarded_date=forwarded_date,
+        response_channel=response_channel,
+    )
+    try:
+        result = execute(
+            {
+                "message_text": raw_message_text,
+                "parsed_command": command,
+                "response_channel": response_channel,
+                "session_key": _followup_context_key(source),
+            },
+            runtime,
+        )
+    except Exception:
+        return None
+    status = str(result.get("status") or "command_needs_clarification")
+    action = str(command.get("action") or "")
+    if status != "command_completed" and action == "more_info":
+        return None
+    _mark_receipt_processed(receipt)
+    db.commit()
+    return _command_reply(
+        db=db,
+        user=user,
+        channel=response_channel,
+        template="command_reply",
+        subject=response_subject,
+        status=_tool_status_to_webhook(status),
+        message=str(result.get("message") or "I need a more specific command."),
+        request_id=request_id,
+        mutation_executed=bool(result.get("mutation_executed")),
+    )
 
 
 def _collect_extraction_results(
@@ -414,6 +1103,8 @@ def _collect_extraction_results(
     subject: str,
     household_preferences: str,
     timezone_hint: str,
+    reference_datetime_hint: str = "",
+    document_understanding: dict | None = None,
 ) -> tuple[list[ExtractedEvent], list[dict], list[str], list[dict]]:
     if not chunks:
         return [], [], [], []
@@ -422,41 +1113,410 @@ def _collect_extraction_results(
     notes: list[str] = []
     chunk_failures: list[dict] = []
     chunk_summaries: list[dict] = []
-    for chunk in chunks:
+    ordered_results: list[dict] = []
+
+    def _extract_chunk(chunk: AnalysisChunk) -> dict:
         try:
-            result = engine_llm.extract_events(
-                chunk.text,
-                subject,
-                household_preferences=household_preferences,
-                timezone_hint=timezone_hint,
-            )
+            try:
+                result = engine_llm.extract_events(
+                    chunk.text,
+                    subject,
+                    household_preferences=household_preferences,
+                    timezone_hint=timezone_hint,
+                    reference_datetime_hint=reference_datetime_hint,
+                    document_understanding=document_understanding,
+                )
+            except TypeError as exc:
+                if "document_understanding" not in str(exc):
+                    raise
+                result = engine_llm.extract_events(
+                    chunk.text,
+                    subject,
+                    household_preferences=household_preferences,
+                    timezone_hint=timezone_hint,
+                    reference_datetime_hint=reference_datetime_hint,
+                )
             chunk_events = list(result.get("events") or [])
-            events.extend(chunk_events)
             email_level_notes = result.get("email_level_notes")
-            if email_level_notes:
-                notes.append(str(email_level_notes))
-            chunk_summaries.append(
-                {
+            return {
+                "chunk_index": chunk.index,
+                "events": chunk_events,
+                "note": str(email_level_notes) if email_level_notes else None,
+                "summary": {
                     "chunk_index": chunk.index,
                     "label": chunk.label,
                     "char_count": len(chunk.text),
                     "priority_score": chunk.priority_score,
                     "section_labels": chunk.section_labels,
                     "event_count": len(chunk_events),
-                }
-            )
+                },
+                "failure": None,
+            }
         except Exception as exc:
-            chunk_failures.append(
-                {
+            return {
+                "chunk_index": chunk.index,
+                "events": [],
+                "note": None,
+                "summary": None,
+                "failure": {
                     "chunk_index": chunk.index,
                     "label": chunk.label,
                     "char_count": len(chunk.text),
                     "priority_score": chunk.priority_score,
                     "section_labels": chunk.section_labels,
-                    "detail": exc.__class__.__name__,
-                }
-            )
+                    "detail": _llm_failure_detail(exc),
+                },
+            }
+
+    max_workers = min(4, len(chunks))
+    if max_workers <= 1:
+        ordered_results = [_extract_chunk(chunk) for chunk in chunks]
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(copy_context().run, _extract_chunk, chunk)
+                for chunk in chunks
+            ]
+            for future in as_completed(futures):
+                ordered_results.append(future.result())
+
+    for item in sorted(ordered_results, key=lambda entry: entry["chunk_index"]):
+        events.extend(item["events"])
+        if item["note"]:
+            notes.append(item["note"])
+        if item["summary"]:
+            chunk_summaries.append(item["summary"])
+        if item["failure"]:
+            chunk_failures.append(item["failure"])
     return dedupe_extracted_events(events), chunk_summaries, notes, chunk_failures
+
+
+def _relevancy_payload_is_relevant(payload: dict) -> bool:
+    return any(
+        bool(payload.get(key))
+        for key in ["name_match", "teacher_match", "school_match", "grade_match", "preference_match"]
+    )
+
+
+def _legacy_route_extracted_events(
+    *,
+    extracted_events: list[ExtractedEvent],
+    children: list[Child],
+    priority_preferences: dict,
+    sender_email_hint: str,
+    sender_name_hint: str,
+) -> list[dict]:
+    decisions: list[dict] = []
+    for idx, candidate in enumerate(extracted_events, start=1):
+        validation = validate_candidate(candidate)
+        event_text = " ".join(
+            [
+                candidate.title or "",
+                " ".join(candidate.mentioned_names or []),
+                " ".join(candidate.mentioned_schools or []),
+                " ".join(candidate.target_grades or []),
+                candidate.model_reason or "",
+            ]
+        )
+        relevancy = compute_relevancy_evidence(
+            event_text=event_text,
+            target_grades=list(candidate.target_grades or []),
+            model_preference_match=bool(candidate.preference_match),
+            children=children,
+            positive_preference_topics=list(priority_preferences["user_priority_topics"]),
+            sender_email=sender_email_hint,
+            sender_display_name=sender_name_hint,
+            target_scope=(candidate.target_scope or "unknown").strip(),
+        )
+        matched_positive_topics = [
+            topic
+            for topic in list(priority_preferences["user_priority_topics"])
+            if topic_matches_text(
+                topic,
+                candidate.title,
+                candidate.category,
+                candidate.model_reason,
+                " ".join(candidate.target_grades or []),
+                " ".join(candidate.mentioned_names or []),
+                " ".join(candidate.mentioned_schools or []),
+            )
+        ]
+        matched_suppressed_topics = [
+            topic
+            for topic in list(priority_preferences["effective_suppressed_priority_topics"])
+            if topic_matches_text(
+                topic,
+                candidate.title,
+                candidate.category,
+                candidate.model_reason,
+                " ".join(candidate.target_grades or []),
+                " ".join(candidate.mentioned_names or []),
+                " ".join(candidate.mentioned_schools or []),
+            )
+        ]
+        suppressed_match = any(
+            matched_suppressed_topics
+        )
+        is_relevant = relevancy.is_relevant
+        target_scope = (candidate.target_scope or "unknown").strip()
+        is_school_global = target_scope == "school_global"
+        auto_add_decision = evaluate_auto_add_candidate(candidate, relevancy, children, suppressed_match=suppressed_match)
+
+        if is_relevant and validation["valid"] and auto_add_decision.allow:
+            execution_disposition = "create_event"
+            final_reason = "relevant_and_actionable_auto_add"
+        elif is_relevant:
+            execution_disposition = "followup_available"
+            final_reason = "relevant_for_followup"
+        elif is_school_global:
+            execution_disposition = "informational_item"
+            final_reason = "not_relevant_school_global"
+        else:
+            execution_disposition = "ignore"
+            final_reason = "not_relevant"
+
+        decisions.append(
+            {
+                "index": idx,
+                "validation": validation,
+                "relevancy_evidence": relevancy.as_dict(),
+                "suppressed_match": suppressed_match,
+                "matched_positive_topics": matched_positive_topics,
+                "matched_suppressed_topics": matched_suppressed_topics,
+                "auto_add_decision": {"allow": auto_add_decision.allow, "reason": auto_add_decision.reason},
+                "execution_disposition": execution_disposition,
+                "final_reason": final_reason,
+            }
+        )
+    return decisions
+
+
+def _match_extracted_event_preferences(
+    *,
+    extracted_events: list[ExtractedEvent],
+    priority_preferences: dict,
+    document_understanding: dict | None = None,
+) -> list[dict]:
+    if not extracted_events:
+        return []
+    if not list(priority_preferences["user_priority_topics"]) and not list(priority_preferences["effective_suppressed_priority_topics"]):
+        return []
+    matcher = getattr(engine_llm, "match_event_preferences", None)
+    if not callable(matcher):
+        return []
+    try:
+        decisions = matcher(
+            extracted_events=extracted_events,
+            positive_preference_topics=list(priority_preferences["user_priority_topics"]),
+            suppressed_priority_topics=list(priority_preferences["effective_suppressed_priority_topics"]),
+            document_understanding=document_understanding,
+        )
+    except NotImplementedError:
+        return []
+    except Exception:
+        return []
+    if len(decisions) != len(extracted_events):
+        return []
+    return [dict(item or {}) for item in decisions]
+
+
+def _overlay_preference_match_decision(base: dict, match: dict) -> dict:
+    if not match:
+        return dict(base or {})
+    merged = dict(base or {})
+    relevancy = dict(merged.get("relevancy_evidence") or {})
+    if "preference_match" in match:
+        relevancy["preference_match"] = bool(match.get("preference_match"))
+    if "matched_positive_topics" in match:
+        relevancy["matched_positive_topics"] = [
+            str(item).strip() for item in list(match.get("matched_positive_topics") or []) if str(item).strip()
+        ]
+        merged["matched_positive_topics"] = list(relevancy["matched_positive_topics"])
+    if "suppressed_match" in match:
+        merged["suppressed_match"] = bool(match.get("suppressed_match"))
+    if "matched_suppressed_topics" in match:
+        merged["matched_suppressed_topics"] = [
+            str(item).strip() for item in list(match.get("matched_suppressed_topics") or []) if str(item).strip()
+        ]
+    if relevancy:
+        merged["relevancy_evidence"] = relevancy
+    return merged
+
+
+def _route_extracted_events(
+    *,
+    extracted_events: list[ExtractedEvent],
+    children: list[Child],
+    priority_preferences: dict,
+    sender_email_hint: str,
+    sender_name_hint: str,
+    timezone_hint: str,
+    evaluation_datetime_utc: str,
+    document_understanding: dict | None = None,
+) -> list[dict]:
+    if not extracted_events:
+        return []
+    fallback_decisions = _legacy_route_extracted_events(
+        extracted_events=extracted_events,
+        children=children,
+        priority_preferences=priority_preferences,
+        sender_email_hint=sender_email_hint,
+        sender_name_hint=sender_name_hint,
+    )
+    preference_match_decisions = _match_extracted_event_preferences(
+        extracted_events=extracted_events,
+        priority_preferences=priority_preferences,
+        document_understanding=document_understanding,
+    )
+    route_events = getattr(engine_llm, "route_events", None)
+    if not callable(route_events):
+        if not preference_match_decisions:
+            return fallback_decisions
+        return [
+            _apply_routing_guardrails(
+                proposed=_overlay_preference_match_decision({}, match),
+                fallback=dict(fallback or {}),
+                candidate=candidate,
+            )
+            for candidate, fallback, match in zip(extracted_events, fallback_decisions, preference_match_decisions)
+        ]
+    try:
+        decisions = route_events(
+            extracted_events=extracted_events,
+            children=children,
+            positive_preference_topics=list(priority_preferences["user_priority_topics"]),
+            suppressed_priority_topics=list(priority_preferences["effective_suppressed_priority_topics"]),
+            sender_email=sender_email_hint,
+            sender_display_name=sender_name_hint,
+            timezone_hint=timezone_hint,
+            evaluation_datetime_utc=evaluation_datetime_utc,
+            document_understanding=document_understanding,
+        )
+    except NotImplementedError:
+        decisions = []
+    except Exception:
+        decisions = []
+    if decisions and len(decisions) != len(extracted_events):
+        raise ValueError("Event routing decision count mismatch")
+    if not decisions:
+        if not preference_match_decisions:
+            return fallback_decisions
+        return [
+            _apply_routing_guardrails(
+                proposed=_overlay_preference_match_decision({}, match),
+                fallback=dict(fallback or {}),
+                candidate=candidate,
+            )
+            for candidate, fallback, match in zip(extracted_events, fallback_decisions, preference_match_decisions)
+        ]
+    return [
+        _apply_routing_guardrails(
+            proposed=_overlay_preference_match_decision(dict(proposed or {}), preference_match),
+            fallback=dict(fallback or {}),
+            candidate=candidate,
+        )
+        for candidate, proposed, fallback, preference_match in zip(
+            extracted_events,
+            decisions,
+            fallback_decisions,
+            preference_match_decisions or [{} for _ in extracted_events],
+        )
+    ]
+
+
+def _apply_routing_guardrails(*, proposed: dict, fallback: dict, candidate: ExtractedEvent) -> dict:
+    validation = dict(fallback.get("validation") or {})
+    relevancy_fallback = dict(fallback.get("relevancy_evidence") or {})
+    relevancy_proposed = dict(proposed.get("relevancy_evidence") or {})
+    merged_relevancy = {}
+    non_preference_bool_keys = {"name_match", "teacher_match", "school_match", "grade_match"}
+    child_id_keys = {"name_child_ids", "teacher_child_ids", "school_child_ids", "grade_child_ids"}
+    for key, value in relevancy_fallback.items():
+        if isinstance(value, list):
+            merged_relevancy[key] = list(value)
+        else:
+            merged_relevancy[key] = bool(value)
+    for key, value in relevancy_proposed.items():
+        if key in child_id_keys and isinstance(value, list):
+            existing = [int(item) for item in list(merged_relevancy.get(key) or []) if str(item).isdigit()]
+            merged_relevancy[key] = sorted({*existing, *[int(item) for item in value if str(item).isdigit()]})
+        elif key in non_preference_bool_keys and isinstance(value, bool):
+            merged_relevancy[key] = bool(merged_relevancy.get(key)) or value
+        elif key == "matched_positive_topics" and isinstance(value, list):
+            merged_relevancy[key] = [str(item).strip() for item in value if str(item).strip()]
+        elif key == "preference_match" and isinstance(value, bool):
+            merged_relevancy[key] = bool(value)
+
+    auto_add_decision = dict(fallback.get("auto_add_decision") or {})
+    suppressed_match = (
+        bool(proposed.get("suppressed_match"))
+        if "suppressed_match" in proposed
+        else bool(fallback.get("suppressed_match"))
+    )
+    matched_positive_topics = list(merged_relevancy.get("matched_positive_topics") or [])
+    if not matched_positive_topics:
+        matched_positive_topics = [str(item).strip() for item in list(fallback.get("matched_positive_topics") or []) if str(item).strip()]
+        if "matched_positive_topics" in proposed:
+            matched_positive_topics = [str(item).strip() for item in list(proposed.get("matched_positive_topics") or []) if str(item).strip()]
+    matched_suppressed_topics = [str(item).strip() for item in list(fallback.get("matched_suppressed_topics") or []) if str(item).strip()]
+    if "matched_suppressed_topics" in proposed:
+        matched_suppressed_topics = [str(item).strip() for item in list(proposed.get("matched_suppressed_topics") or []) if str(item).strip()]
+    is_relevant = _relevancy_payload_is_relevant(merged_relevancy)
+    is_school_global = (candidate.target_scope or "unknown").strip() == "school_global"
+
+    allowed_dispositions: set[str]
+    if is_relevant and bool(validation.get("valid")) and bool(auto_add_decision.get("allow")):
+        allowed_dispositions = {"create_event", "followup_available"}
+    elif is_relevant:
+        allowed_dispositions = {"followup_available"}
+    elif is_school_global:
+        allowed_dispositions = {"informational_item", "ignore"}
+    else:
+        allowed_dispositions = {"ignore"}
+
+    proposed_disposition = str(proposed.get("execution_disposition") or "").strip()
+    if proposed_disposition not in allowed_dispositions:
+        proposed_disposition = str(fallback.get("execution_disposition") or "").strip()
+    if proposed_disposition not in allowed_dispositions:
+        proposed_disposition = next(iter(sorted(allowed_dispositions)))
+
+    final_reason = {
+        "create_event": "relevant_and_actionable_auto_add",
+        "followup_available": "relevant_for_followup",
+        "informational_item": "not_relevant_school_global",
+        "ignore": "not_relevant",
+    }[proposed_disposition]
+    return {
+        "index": int(fallback.get("index") or proposed.get("index") or 0),
+        "validation": validation,
+        "relevancy_evidence": merged_relevancy,
+        "suppressed_match": suppressed_match,
+        "matched_positive_topics": list(dict.fromkeys(matched_positive_topics)),
+        "matched_suppressed_topics": list(dict.fromkeys(matched_suppressed_topics)),
+        "auto_add_decision": auto_add_decision,
+        "execution_disposition": proposed_disposition,
+        "final_reason": final_reason,
+    }
+
+
+def _llm_failure_detail(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code if exc.response is not None else None
+        detail = exc.__class__.__name__
+        if status_code is not None:
+            detail = f"{detail}:{status_code}"
+        if exc.response is not None:
+            try:
+                payload = exc.response.json()
+            except ValueError:
+                payload = {}
+            error = payload.get("error") if isinstance(payload, dict) else {}
+            if isinstance(error, dict):
+                code = str(error.get("code") or error.get("type") or "").strip()
+                if code:
+                    detail = f"{detail}:{code}"
+        return detail
+    return exc.__class__.__name__
 
 
 def _to_user_timezone(value: Optional[datetime], timezone_name: str) -> Optional[datetime]:
@@ -489,6 +1549,27 @@ def _format_event_window(start_at: Optional[object], end_at: Optional[object], t
     if start_local is None:
         return ""
     day = f"{start_local.strftime('%b')} {start_local.day}"
+    if (
+        end_local is not None
+        and start_local.hour == 0
+        and start_local.minute == 0
+        and start_local.second == 0
+        and (
+            (
+                end_local.date() == (start_local + timedelta(days=1)).date()
+                and end_local.hour == 0
+                and end_local.minute == 0
+                and end_local.second == 0
+            )
+            or (
+                end_local.date() == start_local.date()
+                and end_local.hour == 23
+                and end_local.minute == 59
+                and end_local.second == 59
+            )
+        )
+    ):
+        return day
     if end_local and start_local.date() != end_local.date():
         return f"{day} to {end_local.strftime('%b')} {end_local.day}"
     if start_local.hour == 0 and start_local.minute == 0:
@@ -506,24 +1587,36 @@ def _serialize_dt(value: Optional[datetime]) -> Optional[str]:
 
 
 def seed_data(db: Session) -> None:
+    default_admin_email = settings.local_test_admin_email or "admin@example.com"
     existing_household = db.scalar(select(Household).where(Household.id == 1))
     if existing_household:
-        admin = db.scalar(select(User).where(User.household_id == 1, User.email == "admin@example.com"))
+        admin = db.scalar(select(User).where(User.household_id == 1, User.email == default_admin_email))
+        if admin is None and settings.local_test_admin_email:
+            admin = db.scalar(
+                select(User).where(
+                    User.household_id == 1,
+                    User.is_admin.is_(True),
+                    User.verified.is_(True),
+                )
+            )
+            if admin is not None:
+                admin.email = default_admin_email
         if admin and not admin.phone:
             admin.phone = "+15550000001"
-        if not existing_household.spouse_phone:
-            existing_household.spouse_phone = "+15550000002"
         credential = db.scalar(select(GoogleCredential).where(GoogleCredential.household_id == 1))
         if not credential:
             credential = GoogleCredential(
                 household_id=1,
-                provider_user_email="admin@example.com",
-                token_subject="admin@example.com",
+                provider_user_email=default_admin_email,
+                token_subject=default_admin_email,
                 access_token="mock-access-token",
                 status="active",
             )
             db.add(credential)
             db.flush()
+        elif settings.local_test_admin_email:
+            credential.provider_user_email = default_admin_email
+            credential.token_subject = default_admin_email
         binding = db.scalar(select(CalendarBinding).where(CalendarBinding.household_id == 1))
         if not binding:
             db.add(
@@ -535,19 +1628,21 @@ def seed_data(db: Session) -> None:
                     status="active",
                 )
             )
+        elif settings.local_test_admin_email:
+            binding.calendar_owner_email = default_admin_email
         ensure_priority_rules(db, 1)
         return
 
-    household = Household(id=1, timezone="UTC", spouse_phone="+15550000002", spouse_notifications_enabled=True)
-    admin = User(household_id=1, email="admin@example.com", phone="+15550000001", is_admin=True, verified=True)
+    household = Household(id=1, timezone="UTC")
+    admin = User(household_id=1, email=default_admin_email, phone="+15550000001", is_admin=True, verified=True)
     profile = PreferenceProfile(household_id=1, raw_text="Closures are critical", structured_json={"user_priority_topics": []})
     db.add_all([household, admin, profile])
     db.flush()
 
     credential = GoogleCredential(
         household_id=1,
-        provider_user_email="admin@example.com",
-        token_subject="admin@example.com",
+        provider_user_email=default_admin_email,
+        token_subject=default_admin_email,
         access_token="mock-access-token",
         status="active",
     )
@@ -558,7 +1653,7 @@ def seed_data(db: Session) -> None:
         household_id=1,
         google_credential_id=credential.id,
         calendar_id="primary",
-        calendar_owner_email="admin@example.com",
+        calendar_owner_email=default_admin_email,
         status="active",
     )
     db.add(binding)
@@ -623,19 +1718,152 @@ def _safe_utc(value: datetime) -> datetime:
     return value
 
 
-def _validate_pending_actionable(pending: PendingEvent) -> Optional[str]:
-    now = datetime.now(timezone.utc)
-    event_start = _safe_utc(pending.event_start)
-    expires_at = _safe_utc(pending.expires_at)
-    if pending.status != "pending":
-        return f"Pending item is already {pending.status}."
-    if expires_at <= now or event_start < now:
-        return "Pending item is expired."
-    return None
+def _normalized_sender_identity(value: str) -> tuple[str, str]:
+    name, email = parseaddr(value or "")
+    normalized_email = email.strip().lower()
+    normalized_name = re.sub(r"\s+", " ", name.strip())
+    if normalized_email:
+        return normalized_email, normalized_name
+    fallback = re.sub(r"\s+", " ", (value or "").strip())
+    return "", fallback
+
+
+def _serialize_teacher_contacts(child: Child) -> list[dict]:
+    contacts = []
+    for contact in list(child.teacher_contacts or []):
+        contacts.append(
+            {
+                "id": contact.id,
+                "teacher_name": contact.teacher_name,
+                "teacher_email": contact.teacher_email,
+                "status": contact.status,
+            }
+        )
+    return contacts
+
+
+def _clean_teacher_contacts(raw_contacts: list[dict]) -> list[dict]:
+    cleaned: list[dict] = []
+    seen_emails: set[str] = set()
+    for raw_contact in raw_contacts:
+        teacher_name = re.sub(r"\s+", " ", str(raw_contact.get("teacher_name") or "").strip())
+        teacher_email, parsed_name = _normalized_sender_identity(str(raw_contact.get("teacher_email") or ""))
+        if not teacher_email:
+            continue
+        if not teacher_name:
+            teacher_name = parsed_name
+        status = str(raw_contact.get("status") or "active").strip().lower() or "active"
+        if teacher_email in seen_emails:
+            continue
+        seen_emails.add(teacher_email)
+        cleaned.append(
+            {
+                "teacher_name": teacher_name,
+                "teacher_email": teacher_email,
+                "status": status,
+            }
+        )
+    return cleaned
+
+
+def _replace_teacher_contacts(child: Child, raw_contacts: list[dict]) -> None:
+    child.teacher_contacts[:] = [
+        TeacherContact(
+            teacher_name=contact["teacher_name"],
+            teacher_email=contact["teacher_email"],
+            status=contact["status"],
+        )
+        for contact in _clean_teacher_contacts(raw_contacts)
+    ]
+
+
+def _parse_teacher_contacts_text(raw_text: str) -> list[dict]:
+    contacts: list[dict] = []
+    for raw_line in (raw_text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        name, email = parseaddr(line)
+        if email:
+            contacts.append({"teacher_name": name.strip(), "teacher_email": email.strip(), "status": "active"})
+            continue
+        if "," in line:
+            left, right = [part.strip() for part in line.split(",", 1)]
+            contacts.append({"teacher_name": left, "teacher_email": right, "status": "active"})
+            continue
+        contacts.append({"teacher_name": "", "teacher_email": line, "status": "active"})
+    return contacts
+
+
+def _build_agent_household_context(
+    db: Session,
+    *,
+    user: User,
+    household: Household | None = None,
+    children: list[Child] | None = None,
+    priority_preferences: dict | None = None,
+) -> dict:
+    household_row = household or db.scalar(select(Household).where(Household.id == user.household_id))
+    child_rows = (
+        children
+        if children is not None
+        else db.scalars(select(Child).where(Child.household_id == user.household_id, Child.status == "active")).all()
+    )
+    preference_payload = priority_preferences or load_priority_preferences(db, user.household_id)
+    timezone_name = (
+        str(user.timezone or "").strip()
+        or str(getattr(household_row, "timezone", "") or "").strip()
+        or "UTC"
+    )
+    return {
+        "timezone": timezone_name,
+        "household": {
+            "household_id": user.household_id,
+            "timezone": str(getattr(household_row, "timezone", "") or timezone_name),
+            "spouse_phone": str(getattr(household_row, "spouse_phone", "") or ""),
+            "spouse_notifications_enabled": bool(getattr(household_row, "spouse_notifications_enabled", False)),
+            "daily_summary_enabled": bool(getattr(household_row, "daily_summary_enabled", False)),
+            "weekly_digest_enabled": bool(getattr(household_row, "weekly_digest_enabled", False)),
+        },
+        "admin_user": {
+            "user_id": user.id,
+            "email": str(user.email or ""),
+            "phone": str(user.phone or ""),
+            "timezone": timezone_name,
+            "is_admin": bool(user.is_admin),
+            "verified": bool(user.verified),
+        },
+        "children": [
+            {
+                "id": child.id,
+                "name": str(child.name or ""),
+                "school_name": str(child.school_name or ""),
+                "grade": str(child.grade or ""),
+                "status": str(child.status or ""),
+                "teacher_contacts": _serialize_teacher_contacts(child),
+            }
+            for child in child_rows
+        ],
+        "preferences": {
+            "raw_text": str(preference_payload.get("raw_text") or ""),
+            "system_defaults": list(preference_payload.get("system_defaults") or []),
+            "preset_priority_topics": list(preference_payload.get("preset_priority_topics") or []),
+            "parsed_priority_topics": list(preference_payload.get("parsed_priority_topics") or []),
+            "suppressed_priority_topics": list(preference_payload.get("suppressed_priority_topics") or []),
+            "user_priority_topics": list(preference_payload.get("user_priority_topics") or []),
+            "effective_suppressed_priority_topics": list(
+                preference_payload.get("effective_suppressed_priority_topics") or []
+            ),
+            "command_written_preferences": list(preference_payload.get("command_written_preferences") or []),
+            "preference_parse_status": str(preference_payload.get("preference_parse_status") or ""),
+            "preference_parse_error": str(preference_payload.get("preference_parse_error") or ""),
+        },
+    }
 
 
 def _handle_more_info_command(
     *,
+    db: Session | None = None,
     request_id: str,
     topic: Optional[str],
     context: Optional[FollowupContext] = None,
@@ -658,9 +1886,10 @@ def _handle_more_info_command(
                 mutation_executed=False,
                 processing_state=ProcessingState.COMPLETED.value,
             )
+        message = _compose_more_info_message(db=db, topic=topic, context=context, match=match)
         return InboundResponse(
             status=WebhookStatus.COMMAND_COMPLETED.value,
-            message=build_more_info_message(context, match),
+            message=message,
             request_id=request_id,
             mutation_executed=False,
             processing_state=ProcessingState.COMPLETED.value,
@@ -674,8 +1903,168 @@ def _handle_more_info_command(
     )
 
 
+def _compose_more_info_message(
+    *,
+    db: Session | None = None,
+    topic: str,
+    context: FollowupContext,
+    match: FollowupMatch,
+) -> str:
+    matched_item = dict(match.item or {})
+    assistant_summary = ""
+    for snippet in list(context.section_snippets or []):
+        if str(snippet.get("meta") or "") == "document_understanding":
+            assistant_summary = str(snippet.get("text") or "").strip()
+            if assistant_summary:
+                break
+    context_assessment = assess_more_info_context(context, match, limit=3)
+    source_snippets = list(context_assessment.stored_snippets)
+    if context_assessment.weak and db is not None:
+        source_snippets.extend(
+            retrieve_more_info_source_snippets(
+                db,
+                context=context,
+                match=match,
+                query_text=topic,
+                limit=3,
+            )
+        )
+    deduped_source_snippets: list[str] = []
+    seen_source_snippets: set[str] = set()
+    for snippet in source_snippets:
+        normalized = _normalize_followup_text(snippet)
+        if not normalized or normalized in seen_source_snippets:
+            continue
+        seen_source_snippets.add(normalized)
+        deduped_source_snippets.append(str(snippet).strip())
+    payload = {
+        "user_query": str(topic or "").strip(),
+        "summary_title": str(context.summary_title or "").strip(),
+        "assistant_summary": assistant_summary,
+        "summary_line": str(
+            matched_item.get("display_text")
+            or matched_item.get("text")
+            or matched_item.get("title")
+            or ""
+        ).strip(),
+        "matched_item": {
+            "item_id": matched_item.get("item_id"),
+            "title": matched_item.get("title"),
+            "display_text": matched_item.get("display_text"),
+            "text": matched_item.get("text"),
+            "aliases": list(matched_item.get("aliases") or []),
+            "kind": matched_item.get("kind"),
+            "start_at": matched_item.get("start_at"),
+            "end_at": matched_item.get("end_at"),
+            "date_sort_key": matched_item.get("date_sort_key"),
+            "reason": matched_item.get("reason"),
+            "assistant_detail": matched_item.get("assistant_detail"),
+            "timing_hint": matched_item.get("timing_hint"),
+            "action_hint": matched_item.get("action_hint"),
+            "scope_hint": matched_item.get("scope_hint"),
+            "applies_to": list(matched_item.get("applies_to") or []),
+            "action_capabilities": dict(matched_item.get("action_capabilities") or {}),
+            "source_refs": list(matched_item.get("source_refs") or []),
+        },
+        "source_snippets": deduped_source_snippets[:4],
+        "source_retrieval_used": bool(context_assessment.weak and len(deduped_source_snippets) > len(context_assessment.stored_snippets)),
+        "source_retrieval_reason": context_assessment.reason,
+    }
+    composer = getattr(engine_llm, "compose_more_info_reply", None)
+    if callable(composer):
+        try:
+            result = composer(payload)
+        except Exception:
+            result = None
+        if isinstance(result, dict):
+            message = str(result.get("message") or "").strip()
+            if message:
+                return message
+    return build_more_info_message(context, match, snippets=deduped_source_snippets[:4])
+
+
 def _response_target_for_channel(user: User, channel: str) -> str:
     return user.phone if channel == "sms" else user.email
+
+
+def _source_session_id(source: SourceMessage) -> str:
+    if source.source_channel == "sms":
+        return sms_session_id(household_id=source.household_id)
+    thread_key = str(source.thread_key or source.provider_message_id or "").strip()
+    return email_session_id(household_id=source.household_id, thread_key=thread_key)
+
+
+def _followup_context_key(source: SourceMessage) -> str:
+    if source.source_channel == "sms":
+        return sms_session_id(household_id=source.household_id)
+    return str(source.thread_key or source.provider_message_id or "").strip()
+
+
+def _append_user_turn_to_session(db: Session, source: SourceMessage) -> None:
+    if source.source_channel == "sms":
+        text = str(source.body_text or "").strip()
+    else:
+        text = (
+            "Email subject:\n"
+            f"{source.subject or ''}\n\n"
+            "Email body:\n"
+            f"{source.body_text or ''}"
+        ).strip()
+    if not text:
+        return
+    queue_session_message(
+        db,
+        _source_session_id(source),
+        role="user",
+        text=text,
+    )
+
+
+@contextmanager
+def _conversation_runtime_scope(
+    *,
+    source: SourceMessage,
+    thread_documents: list,
+    household_context: dict | None = None,
+) -> Iterator[None]:
+    session_id = _source_session_id(source)
+    email_headers = build_email_reply_headers(source) if source.source_channel == "email" else None
+    trace_context = current_trace_context()
+    trace_metadata = dict(trace_context.metadata or {}) if trace_context and trace_context.metadata else {}
+    trace_metadata.update(
+        {
+            "household_id": source.household_id,
+            "source_channel": source.source_channel,
+            "thread_key": str(source.thread_key or ""),
+            "provider_message_id": source.provider_message_id,
+        }
+    )
+    workflow_name = (
+        trace_context.workflow_name
+        if trace_context and trace_context.workflow_name
+        else "LovelyChaos inbound conversation"
+    )
+    group_id = str(source.thread_key or source.provider_message_id or session_id)
+    llm_scope = (
+        engine_llm.conversation_scope(
+            session_id=session_id,
+            workflow_name=workflow_name,
+            group_id=group_id,
+            thread_documents=thread_documents,
+            household_context=household_context or {},
+            trace_metadata=trace_metadata,
+        )
+        if hasattr(engine_llm, "conversation_scope")
+        else nullcontext()
+    )
+    session_token = _CURRENT_CONVERSATION_SESSION_ID.set(session_id)
+    header_token = _CURRENT_EMAIL_REPLY_HEADERS.set(email_headers)
+    try:
+        with llm_scope:
+            yield
+    finally:
+        _CURRENT_EMAIL_REPLY_HEADERS.reset(header_token)
+        _CURRENT_CONVERSATION_SESSION_ID.reset(session_token)
 
 
 def _send_user_response(
@@ -690,7 +2079,7 @@ def _send_user_response(
     target = _response_target_for_channel(user, channel)
     if not target:
         return
-    send_channel_notification(
+    result = send_channel_notification(
         db=db,
         provider=notification_provider,
         household_id=user.household_id,
@@ -700,7 +2089,39 @@ def _send_user_response(
         template=template,
         subject=subject,
         message=message,
+        email_headers=_CURRENT_EMAIL_REPLY_HEADERS.get() if channel == "email" else None,
     )
+    session_id = _CURRENT_CONVERSATION_SESSION_ID.get()
+    if session_id and result.get("sent"):
+        queue_session_message(
+            db,
+            session_id,
+            role="assistant",
+            text=message,
+        )
+
+
+def _commit_then_send_user_response(
+    *,
+    db: Session,
+    user: User,
+    channel: str,
+    template: str,
+    subject: str,
+    message: str,
+) -> None:
+    # End the ingestion transaction before outbound network calls so concurrent
+    # webhooks do not sit behind a long-lived SQLite writer.
+    db.commit()
+    _send_user_response(
+        db=db,
+        user=user,
+        channel=channel,
+        template=template,
+        subject=subject,
+        message=message,
+    )
+    db.commit()
 
 
 def _reply_subject(subject: str) -> str:
@@ -720,7 +2141,7 @@ def _command_reply(
     request_id: str,
     mutation_executed: bool,
 ) -> InboundResponse:
-    _send_user_response(
+    _commit_then_send_user_response(
         db=db,
         user=user,
         channel=channel,
@@ -728,7 +2149,6 @@ def _command_reply(
         subject=subject,
         message=message,
     )
-    db.commit()
     return InboundResponse(
         status=status.value,
         message=message,
@@ -764,6 +2184,8 @@ def _resolve_calendar_context(db: Session, household_id: int) -> tuple[GoogleCre
 
 def _resolve_calendar_context_with_refresh(db: Session, household_id: int) -> tuple[GoogleCredential, CalendarBinding]:
     credential, binding = _resolve_calendar_context(db, household_id)
+    if getattr(settings, "google_calendar_mode", "live") != "live":
+        return credential, binding
     if should_refresh_token(credential.token_expiry):
         if not credential.refresh_token:
             raise ValueError("Google credential expired and refresh token is missing.")
@@ -841,7 +2263,7 @@ def _handle_reminder_command(
     response_channel: str,
     response_subject: str,
 ) -> InboundResponse:
-    event_id = command["pending_id"]
+    event_id = command["event_id"]
     if event_id is None:
         _mark_receipt_processed(receipt)
         db.commit()
@@ -1015,6 +2437,324 @@ def _build_candidate_clarification(candidates: list[ExtractedEvent], timezone_na
     return "\n".join(lines)
 
 
+def _followup_item_display(item: dict, timezone_name: str) -> str:
+    label = str(item.get("display_text") or item.get("text") or item.get("title") or "Untitled item").strip()
+    start_at = _coerce_datetime(item.get("start_at") or item.get("date_sort_key"))
+    end_at = _coerce_datetime(item.get("end_at"))
+    window = _format_event_window(start_at, end_at, timezone_name)
+    return f"{window}: {label}" if window else label
+
+
+def _build_numbered_followup_clarification(
+    candidate_items: list[dict],
+    *,
+    timezone_name: str,
+    requested_action: str,
+) -> str:
+    if requested_action == "more_info":
+        lines = ["I found multiple matching topics in the latest school updates. Reply with the number or exact topic:"]
+    else:
+        lines = ["I found multiple possible events in that email. Reply with the number or exact event you want:"]
+    for idx, item in enumerate(candidate_items[:5], start=1):
+        lines.append(f"{idx}. {_followup_item_display(item, timezone_name)}")
+    return "\n".join(lines)
+
+
+def _looks_like_calendar_add_request(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+    if re.search(r"\badd\b", normalized):
+        return True
+    return bool(re.search(r"\b(?:calendar|cal)\b", normalized) and _parse_month_day_date(text, "UTC"))
+
+
+def _select_candidate_by_index(reply_text: str, candidate_items: list[dict]) -> Optional[dict]:
+    match = re.search(r"\b(?:option\s*)?(\d{1,2})\b", reply_text or "", re.I)
+    if not match:
+        return None
+    index = int(match.group(1))
+    if 1 <= index <= len(candidate_items):
+        return candidate_items[index - 1]
+    return None
+
+
+def _resolve_recent_followup_matches(
+    contexts: list[FollowupContext],
+    *,
+    query_text: str,
+    topic: Optional[str] = None,
+) -> tuple[Optional[FollowupContext], list]:
+    for context in contexts:
+        matches = resolve_followup_candidates(context, query_text=query_text, topic=topic)
+        if matches:
+            return context, matches
+    return None, []
+
+
+def _conversation_state_context(
+    state: SmsConversationState,
+    contexts: list[FollowupContext],
+) -> Optional[FollowupContext]:
+    allowed_ids = {int(value) for value in list(state.source_followup_context_ids or []) if str(value).isdigit()}
+    if not allowed_ids:
+        return contexts[0] if contexts else None
+    for context in contexts:
+        if context.id in allowed_ids:
+            return context
+    return contexts[0] if contexts else None
+
+
+def _clarification_reply(
+    *,
+    db: Session,
+    user: User,
+    request_id: str,
+    message: str,
+) -> InboundResponse:
+    return _command_reply(
+        db=db,
+        user=user,
+        channel="sms",
+        template="add_clarification",
+        subject="LovelyChaos SMS",
+        status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+        message=message,
+        request_id=request_id,
+        mutation_executed=False,
+    )
+
+
+def _persist_sms_selection_state(
+    db: Session,
+    *,
+    user: User,
+    requested_action: str,
+    candidate_items: list[dict],
+    source_followup_context_ids: list[int],
+) -> SmsConversationState:
+    prompt_message = _build_numbered_followup_clarification(
+        candidate_items,
+        timezone_name=user.timezone,
+        requested_action=requested_action,
+    )
+    return persist_sms_conversation_state(
+        db,
+        household_id=user.household_id,
+        requested_action=requested_action,
+        candidate_items=candidate_items,
+        source_followup_context_ids=source_followup_context_ids,
+        prompt_message=prompt_message,
+    )
+
+
+def _resolve_sms_selection_state(
+    *,
+    db: Session,
+    request_id: str,
+    user: User,
+    state: SmsConversationState,
+    source: SourceMessage,
+    receipt: WebhookReceipt,
+    provider_message_id: str,
+    raw_body_text: str,
+    recent_contexts: list[FollowupContext],
+) -> InboundResponse:
+    selected_item = _select_candidate_by_index(raw_body_text, list(state.candidate_items or []))
+    if selected_item is None:
+        matches = resolve_candidate_items(list(state.candidate_items or []), query_text=raw_body_text)
+        if not matches:
+            return _clarification_reply(
+                db=db,
+                user=user,
+                request_id=request_id,
+                message=state.prompt_message or "Tell me which item you mean.",
+            )
+        if len(matches) > 1:
+            narrowed_items = [dict(match.item) for match in matches]
+            _persist_sms_selection_state(
+                db,
+                user=user,
+                requested_action=state.requested_action,
+                candidate_items=narrowed_items,
+                source_followup_context_ids=list(state.source_followup_context_ids or []),
+            )
+            return _clarification_reply(
+                db=db,
+                user=user,
+                request_id=request_id,
+                message=_build_numbered_followup_clarification(
+                    narrowed_items,
+                    timezone_name=user.timezone,
+                    requested_action=state.requested_action,
+                ),
+            )
+        selected_item = dict(matches[0].item)
+
+    resolve_sms_conversation_state(state)
+    if state.requested_action == "more_info":
+        context = _conversation_state_context(state, recent_contexts)
+        if context is not None:
+            message = _compose_more_info_message(
+                db=db,
+                topic=raw_body_text,
+                context=context,
+                match=FollowupMatch(item=selected_item, from_summary=False, score=10),
+            )
+        else:
+            title = str(selected_item.get("display_text") or selected_item.get("text") or selected_item.get("title") or "Topic").strip()
+            reason = str(selected_item.get("reason") or "").strip()
+            message = title if not reason else f"{title}\n- {reason}"
+        return _command_reply(
+            db=db,
+            user=user,
+            channel="sms",
+            template="more_info",
+            subject="LovelyChaos SMS",
+            status=WebhookStatus.COMMAND_COMPLETED,
+            message=message,
+            request_id=request_id,
+            mutation_executed=False,
+        )
+
+    candidate = _candidate_from_followup_item(selected_item, user.timezone)
+    if candidate is None:
+        return _clarification_reply(
+            db=db,
+            user=user,
+            request_id=request_id,
+            message="I matched that topic from the last update, but it doesn't have enough scheduling detail to add to the calendar.",
+        )
+    return _create_event_from_candidate(
+        db=db,
+        request_id=request_id,
+        user=user,
+        source=source,
+        receipt=receipt,
+        provider_message_id=provider_message_id,
+        response_channel="sms",
+        response_subject="LovelyChaos SMS",
+        candidate=candidate,
+        inputs={
+            "subject": "",
+            "body_text": raw_body_text,
+            "command_topic": None,
+            "response_channel": "sms",
+        },
+        model_output={"source": "sms_conversation_state", "matched_item": selected_item},
+    )
+
+
+def _try_contextual_sms_assistant(
+    *,
+    db: Session,
+    request_id: str,
+    user: User,
+    source: SourceMessage,
+    receipt: WebhookReceipt,
+    provider_message_id: str,
+    raw_body_text: str,
+    command: dict,
+    active_state: Optional[SmsConversationState],
+) -> Optional[InboundResponse]:
+    recent_contexts = load_recent_followup_contexts(db, household_id=user.household_id)
+
+    if active_state and command.get("action") in {"none", "add", "more_info"}:
+        return _resolve_sms_selection_state(
+            db=db,
+            request_id=request_id,
+            user=user,
+            state=active_state,
+            source=source,
+            receipt=receipt,
+            provider_message_id=provider_message_id,
+            raw_body_text=raw_body_text,
+            recent_contexts=recent_contexts,
+        )
+
+    requested_action = str(command.get("action") or "none")
+    if requested_action == "none" and _looks_like_calendar_add_request(raw_body_text):
+        requested_action = "add"
+    if requested_action not in {"add", "more_info"}:
+        return None
+
+    context, matches = _resolve_recent_followup_matches(
+        recent_contexts,
+        query_text=raw_body_text,
+        topic=command.get("topic"),
+    )
+    if not matches:
+        return None
+    if len(matches) > 1:
+        candidate_items = [dict(match.item) for match in matches]
+        source_ids = [context.id] if context is not None else []
+        _persist_sms_selection_state(
+            db,
+            user=user,
+            requested_action=requested_action,
+            candidate_items=candidate_items,
+            source_followup_context_ids=source_ids,
+        )
+        return _clarification_reply(
+            db=db,
+            user=user,
+            request_id=request_id,
+            message=_build_numbered_followup_clarification(
+                candidate_items,
+                timezone_name=user.timezone,
+                requested_action=requested_action,
+            ),
+        )
+
+    match = matches[0]
+    if requested_action == "more_info":
+        if context is None:
+            return None
+        return _command_reply(
+            db=db,
+            user=user,
+            channel="sms",
+            template="more_info",
+            subject="LovelyChaos SMS",
+            status=WebhookStatus.COMMAND_COMPLETED,
+            message=_compose_more_info_message(
+                db=db,
+                topic=command.get("topic") or raw_body_text,
+                context=context,
+                match=match,
+            ),
+            request_id=request_id,
+            mutation_executed=False,
+        )
+
+    candidate = _candidate_from_followup_item(match.item, user.timezone)
+    if candidate is None:
+        return _clarification_reply(
+            db=db,
+            user=user,
+            request_id=request_id,
+            message="I matched that topic from the last update, but it doesn't have enough scheduling detail to add to the calendar.",
+        )
+    return _create_event_from_candidate(
+        db=db,
+        request_id=request_id,
+        user=user,
+        source=source,
+        receipt=receipt,
+        provider_message_id=provider_message_id,
+        response_channel="sms",
+        response_subject="LovelyChaos SMS",
+        candidate=candidate,
+        inputs={
+            "subject": "",
+            "body_text": raw_body_text,
+            "command_topic": command.get("topic"),
+            "response_channel": "sms",
+        },
+        model_output={"source": "recent_followup_context", "matched_item": match.item},
+    )
+
+
 MONTH_NAME_MAP = {
     "jan": 1,
     "january": 1,
@@ -1105,10 +2845,27 @@ def _parse_forwarded_reference_datetime(value: str, timezone_name: str) -> Optio
     raw = re.sub(r"\s+at\s+(?=\d{1,2}:\d{2}\s*[ap]m\b)", " ", raw, flags=re.I)
     if not raw:
         return None
-    try:
-        parsed = parsedate_to_datetime(raw)
-    except (TypeError, ValueError, IndexError):
-        return None
+    parsed = None
+    for fmt in (
+        "%a, %b %d, %Y %I:%M %p",
+        "%a, %B %d, %Y %I:%M %p",
+        "%b %d, %Y %I:%M %p",
+        "%B %d, %Y %I:%M %p",
+        "%a, %b %d, %Y %I:%M %p %z",
+        "%a, %B %d, %Y %I:%M %p %z",
+        "%b %d, %Y %I:%M %p %z",
+        "%B %d, %Y %I:%M %p %z",
+    ):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        try:
+            parsed = parsedate_to_datetime(raw)
+        except (TypeError, ValueError, IndexError):
+            return None
     if parsed.tzinfo is None:
         try:
             parsed = parsed.replace(tzinfo=ZoneInfo(timezone_name))
@@ -1277,11 +3034,29 @@ def _command_topic_tokens(text: Optional[str]) -> list[str]:
     tokens: list[str] = []
     seen: set[str] = set()
     for token in re.findall(r"[a-z0-9]+", _compact_text(text), flags=re.I):
-        if len(token) < 3 or token in stopwords or token in seen:
+        if ((len(token) < 3 and not token.isdigit()) or token in stopwords or token in seen):
             continue
         seen.add(token)
         tokens.append(token)
     return tokens
+
+
+def _fallback_command_topic(raw_body_text: str) -> Optional[str]:
+    focused_text = _normalize_preface_text(raw_body_text)
+    for pattern in [
+        r"^\s*(?:please\s+)?add\s+(.+?)\s+to\s+(?:the\s+)?cal(?:endar)?\s*$",
+        r"^\s*(?:please\s+)?add\s+(.+?)\s*$",
+    ]:
+        match = re.match(pattern, focused_text or "", re.I)
+        if not match:
+            continue
+        candidate = match.group(1).strip(" .?!")
+        tokens = _command_topic_tokens(candidate)
+        if tokens:
+            return " ".join(tokens[:6])
+        if candidate:
+            return candidate
+    return None
 
 
 def _relevant_forwarded_text(content_body_text: str, command_topic: Optional[str]) -> str:
@@ -1432,19 +3207,291 @@ def _build_past_event_message(candidates: list[ExtractedEvent], timezone_name: s
 
 def _summary_has_content(summary_result) -> bool:
     return bool(
-        summary_result.important_dates
-        or summary_result.important_items
+        summary_result.important_info
+        or summary_result.other_dates
         or summary_result.other_topics
         or "couldn't extract a clean summary" in (summary_result.rendered_message or "").lower()
     )
 
 
+def _document_understanding_priority_terms(document_understanding: dict | None) -> list[str]:
+    if not isinstance(document_understanding, dict):
+        return []
+    terms: list[str] = []
+    for key in ("assistant_summary", "assistant_intro"):
+        value = str(document_understanding.get(key) or "").strip()
+        if value:
+            terms.append(value)
+    for bucket in ("actionable_topics", "informational_topics"):
+        for topic in list(document_understanding.get(bucket) or []):
+            if not isinstance(topic, dict):
+                continue
+            for key in ("title", "why_it_matters", "timing_hint", "action_hint"):
+                value = str(topic.get(key) or "").strip()
+                if value:
+                    terms.append(value)
+    return terms
+
+
+def _document_topics_to_followup_items(document_understanding: dict | None, *, source_message_id: int) -> list[dict]:
+    if not isinstance(document_understanding, dict):
+        return []
+    items: list[dict] = []
+    for bucket_name, default_can_add in (("actionable_topics", False), ("informational_topics", False)):
+        for idx, topic in enumerate(list(document_understanding.get(bucket_name) or []), start=1):
+            if not isinstance(topic, dict):
+                continue
+            title = str(topic.get("title") or "").strip()
+            detail = str(topic.get("why_it_matters") or "").strip()
+            action_hint = str(topic.get("action_hint") or "").strip()
+            timing_hint = str(topic.get("timing_hint") or "").strip()
+            if not title:
+                continue
+            aliases = [title]
+            if timing_hint:
+                aliases.append(timing_hint)
+            text = title
+            if detail:
+                text = f"{title}: {detail}"
+            items.append(
+                {
+                    "item_id": f"msg-{source_message_id}-{bucket_name}-{idx}",
+                    "title": title,
+                    "text": text,
+                    "display_text": title,
+                    "aliases": aliases,
+                    "kind": "document_topic",
+                    "start_at": None,
+                    "end_at": None,
+                    "date_sort_key": None,
+                    "all_day": False,
+                    "source_message_id": source_message_id,
+                    "reason": detail or action_hint or "document_understanding_topic",
+                    "assistant_detail": detail,
+                    "action_hint": action_hint or None,
+                    "timing_hint": timing_hint or None,
+                    "scope_hint": str(topic.get("scope_hint") or "unknown"),
+                    "applies_to": [],
+                    "action_capabilities": {
+                        "can_add": default_can_add,
+                        "can_explain": True,
+                    },
+                }
+            )
+    return items
+
+
+def _document_understanding_section_snippets(document_understanding: dict | None) -> list[dict]:
+    if not isinstance(document_understanding, dict):
+        return []
+    snippets: list[dict] = []
+    assistant_summary = str(document_understanding.get("assistant_summary") or "").strip()
+    if assistant_summary:
+        snippets.append(
+            {
+                "label": "assistant_summary",
+                "text": assistant_summary,
+                "meta": "document_understanding",
+            }
+        )
+    for bucket_name in ("actionable_topics", "informational_topics"):
+        for idx, topic in enumerate(list(document_understanding.get(bucket_name) or []), start=1):
+            if not isinstance(topic, dict):
+                continue
+            title = str(topic.get("title") or "").strip()
+            detail = str(topic.get("why_it_matters") or "").strip()
+            action_hint = str(topic.get("action_hint") or "").strip()
+            timing_hint = str(topic.get("timing_hint") or "").strip()
+            text_parts = [detail]
+            if action_hint:
+                text_parts.append(action_hint)
+            if timing_hint:
+                text_parts.append(f"Timing: {timing_hint}")
+            if not title or not any(text_parts):
+                continue
+            snippets.append(
+                {
+                    "label": title,
+                    "text": " ".join(part for part in text_parts if part).strip(),
+                    "meta": "document_topic",
+                    "bucket": bucket_name,
+                    "topic_index": idx,
+                }
+            )
+    return snippets
+
+
+def _is_all_day_window(start_at: Optional[datetime], end_at: Optional[datetime], timezone_name: str) -> bool:
+    if start_at is None or end_at is None:
+        return False
+    start_local = _to_user_timezone(start_at, timezone_name)
+    end_local = _to_user_timezone(end_at, timezone_name)
+    if start_local is None or end_local is None:
+        return False
+    end_is_day_boundary = (
+        end_local.hour == 0
+        and end_local.minute == 0
+        and end_local.second == 0
+        and end_local.date() > start_local.date()
+    )
+    end_is_end_of_day = (
+        end_local.date() == start_local.date()
+        and end_local.hour == 23
+        and end_local.minute == 59
+        and end_local.second == 59
+    )
+    return (
+        start_local.hour == 0
+        and start_local.minute == 0
+        and start_local.second == 0
+        and (end_is_day_boundary or end_is_end_of_day)
+    )
+
+
+def _normalize_followup_text(value: str) -> str:
+    cleaned = re.sub(r"^[A-Z][a-z]{2}\s+\d{1,2}(?:-[A-Z][a-z]{2}\s+\d{1,2})?:\s*", "", (value or "").strip())
+    cleaned = re.sub(r"[^a-z0-9]+", " ", cleaned.lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _looks_like_deadline_text(*values: str) -> bool:
+    haystack = " ".join(str(value or "") for value in values).lower()
+    return any(token in haystack for token in ["deadline", "register", "registration", "ordering", "order by", "due"])
+
+
+def _normalize_deadline_window(
+    start_at: Optional[datetime],
+    end_at: Optional[datetime],
+    timezone_name: str,
+    *,
+    title: str = "",
+    reason: str = "",
+    force_all_day: bool = False,
+) -> tuple[Optional[datetime], Optional[datetime], bool]:
+    if start_at is None:
+        return start_at, end_at, False
+    start_local = _to_user_timezone(start_at, timezone_name)
+    end_local = _to_user_timezone(end_at, timezone_name) if end_at else None
+    if start_local is None:
+        return start_at, end_at, False
+    all_day = force_all_day or _is_all_day_window(start_at, end_at, timezone_name)
+    if all_day:
+        normalized_end = end_at
+        if end_local and end_local.date() == start_local.date():
+            normalized_end = (start_local + timedelta(days=1)).astimezone(timezone.utc)
+        return start_at, normalized_end, True
+    if (
+        _looks_like_deadline_text(title, reason)
+        and start_local.hour == 0
+        and start_local.minute == 0
+        and start_local.second == 0
+        and end_local is not None
+        and end_local.date() == start_local.date()
+        and (end_at - start_at) <= timedelta(hours=1)
+    ):
+        return start_at, (start_local + timedelta(days=1)).astimezone(timezone.utc), True
+    return start_at, end_at, False
+
+
+def _followup_summary_items(summary_result, actionable_items: list[dict]) -> list[dict]:
+    actionable_by_title = {
+        (_normalize_followup_text(str(item.get("title") or "")), str(item.get("date_sort_key") or "")): item
+        for item in actionable_items
+        if str(item.get("title") or "").strip()
+    }
+    summary_items: list[dict] = []
+    for item in [
+        *[line.as_dict() for line in summary_result.important_info],
+        *[line.as_dict() for line in summary_result.other_dates],
+        *[line.as_dict() for line in summary_result.other_topics],
+    ]:
+        normalized_text = _normalize_followup_text(str(item.get("text") or ""))
+        date_sort_key = str(item.get("date_sort_key") or "")
+        match = actionable_by_title.get((normalized_text, date_sort_key)) or actionable_by_title.get((normalized_text, ""))
+        if match is None:
+            for candidate in actionable_items:
+                normalized_title = _normalize_followup_text(str(candidate.get("title") or ""))
+                if normalized_title and (normalized_title in normalized_text or normalized_text in normalized_title):
+                    if date_sort_key and str(candidate.get("date_sort_key") or "") not in {"", date_sort_key}:
+                        continue
+                    match = candidate
+                    break
+        payload = dict(item)
+        if match is not None:
+            payload["item_id"] = match.get("item_id")
+            payload["aliases"] = list(match.get("aliases") or [])
+            payload["kind"] = match.get("kind")
+            payload["action_capabilities"] = dict(match.get("action_capabilities") or {})
+        summary_items.append(payload)
+    return summary_items
+
+
+def _followup_actionable_items_from_extracted_events(
+    *,
+    extracted_events: list[ExtractedEvent],
+    source_message_id: int,
+    timezone_name: str,
+) -> list[dict]:
+    items: list[dict] = []
+    for idx, event in enumerate(extracted_events, start=1):
+        title = (event.title or "").strip()
+        if not title:
+            continue
+        normalized_start, normalized_end, all_day = _normalize_deadline_window(
+            event.start_at,
+            event.end_at,
+            timezone_name,
+            title=title,
+            reason=event.model_reason,
+        )
+        start_at = _serialize_dt(normalized_start)
+        end_at = _serialize_dt(normalized_end)
+        can_add = bool(normalized_start and normalized_end)
+        kind = "deadline" if can_add and all_day else "event" if can_add else "topic"
+        applies_to = [
+            *list(event.mentioned_names or []),
+            *[f"Gr {grade}" for grade in list(event.target_grades or [])],
+        ]
+        items.append(
+            {
+                "item_id": f"msg-{source_message_id}-item-{idx}",
+                "title": title,
+                "text": title,
+                "aliases": [title, *applies_to],
+                "kind": kind,
+                "start_at": start_at,
+                "end_at": end_at,
+                "date_sort_key": start_at,
+                "all_day": all_day,
+                "source_message_id": source_message_id,
+                "reason": event.model_reason,
+                "applies_to": applies_to,
+                "action_capabilities": {
+                    "can_add": can_add,
+                    "can_explain": True,
+                },
+            }
+        )
+    return items
+
+
 def _candidate_from_followup_item(item: dict, timezone_name: str) -> Optional[ExtractedEvent]:
+    capabilities = dict(item.get("action_capabilities") or {})
+    if capabilities and not capabilities.get("can_add"):
+        return None
     title = str(item.get("title") or item.get("text") or "").strip()
     if not title:
         return None
     start_at = _coerce_datetime(item.get("start_at") or item.get("date_sort_key"))
     end_at = _coerce_datetime(item.get("end_at"))
+    start_at, end_at, _ = _normalize_deadline_window(
+        start_at,
+        end_at,
+        timezone_name,
+        title=title,
+        reason=str(item.get("reason") or ""),
+        force_all_day=bool(item.get("all_day")),
+    )
     if start_at and end_at is None:
         local_start = _to_user_timezone(start_at, timezone_name)
         if local_start.hour == 0 and local_start.minute == 0:
@@ -1480,58 +3527,92 @@ def _create_event_from_candidate(
     inputs: dict,
     model_output: dict,
 ) -> InboundResponse:
+    created = _create_event_from_candidate_result(
+        db=db,
+        request_id=request_id,
+        user=user,
+        source=source,
+        provider_message_id=provider_message_id,
+        candidate=candidate,
+    )
+    status = str(created.get("status") or "command_needs_clarification")
+    if status == "command_completed":
+        validation_payload = {"valid": True}
+        policy_outcome = {"status": "command_completed", "reason": str(created.get("reason") or "event_added")}
+        committed_actions = {"event_created": created.get("title")} if created.get("mutation_executed") else {}
+        template = "event_created"
+        webhook_status = WebhookStatus.COMMAND_COMPLETED
+    elif status == "command_noop_past_event":
+        validation_payload = {"valid": False, "issues": ["event_in_past"]}
+        policy_outcome = {"status": "command_noop_past_event", "reason": str(created.get("reason") or "event_in_past")}
+        committed_actions = {}
+        template = "add_past_event"
+        webhook_status = WebhookStatus.COMMAND_NOOP_PAST_EVENT
+    else:
+        validation_payload = {"valid": False, "issues": list(created.get("issues") or ["no_actionable_event"])}
+        policy_outcome = {"status": "command_needs_clarification", "reason": str(created.get("reason") or "no_actionable_event")}
+        committed_actions = {}
+        template = "add_clarification"
+        webhook_status = _tool_status_to_webhook(status)
+
+    _audit(
+        db,
+        request_id,
+        user.household_id,
+        "info",
+        inputs,
+        model_output,
+        validation_payload,
+        policy_outcome,
+        committed_actions,
+    )
+    _mark_receipt_processed(receipt)
+    db.commit()
+    return _command_reply(
+        db=db,
+        user=user,
+        channel=response_channel,
+        template=template,
+        subject=response_subject,
+        status=webhook_status,
+        message=str(created.get("message") or "I couldn't add that event right now."),
+        request_id=request_id,
+        mutation_executed=bool(created.get("mutation_executed")),
+    )
+
+
+def _create_event_from_candidate_result(
+    *,
+    db: Session,
+    request_id: str,
+    user: User,
+    source: SourceMessage,
+    provider_message_id: str,
+    candidate: ExtractedEvent,
+    all_day_override: Optional[bool] = None,
+) -> dict[str, Any]:
     validation = validate_candidate(candidate)
     if not validation["valid"]:
         issues = set(validation.get("issues") or [])
         if "event_in_past" in issues and not (issues - {"event_in_past", "low_confidence"}):
-            _audit(
-                db,
-                request_id,
-                user.household_id,
-                "info",
-                inputs,
-                model_output,
-                {"valid": False, "issues": validation.get("issues") or ["event_in_past"]},
-                {"status": "command_noop_past_event", "reason": "event_in_past"},
-                {},
-            )
-            _mark_receipt_processed(receipt)
-            db.commit()
-            return _command_reply(
-                db=db,
-                user=user,
-                channel=response_channel,
-                template="add_past_event",
-                subject=response_subject,
-                status=WebhookStatus.COMMAND_NOOP_PAST_EVENT,
-                message=_build_past_event_message([candidate], user.timezone),
-                request_id=request_id,
-                mutation_executed=False,
-            )
-        _audit(
-            db,
-            request_id,
-            user.household_id,
-            "info",
-            inputs,
-            model_output,
-            {"valid": False, "issues": validation.get("issues") or ["no_actionable_event"]},
-            {"status": "command_needs_clarification", "reason": "no_actionable_event"},
-            {},
-        )
-        _mark_receipt_processed(receipt)
-        db.commit()
-        return _command_reply(
-            db=db,
-            user=user,
-            channel=response_channel,
-            template="add_clarification",
-            subject=response_subject,
-            status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-            message="I couldn't find a clear future event to add. Please include the event name and date.",
-            request_id=request_id,
-            mutation_executed=False,
-        )
+            return {
+                "ok": False,
+                "status": "command_noop_past_event",
+                "message": _build_past_event_message([candidate], user.timezone),
+                "mutation_executed": False,
+                "reason": "event_in_past",
+                "issues": validation.get("issues") or ["event_in_past"],
+                "title": candidate.title,
+            }
+        return {
+            "ok": False,
+            "status": "command_needs_clarification",
+            "message": "I couldn't find a clear future event to add. Please include the event name and date.",
+            "mutation_executed": False,
+            "reason": "no_actionable_event",
+            "issues": validation.get("issues") or ["no_actionable_event"],
+            "title": candidate.title,
+        }
 
     idem_key = f"{provider_message_id}:add:{candidate.title}:{candidate.start_at}:{candidate.end_at}"
     existing_idem = db.scalar(
@@ -1542,25 +3623,27 @@ def _create_event_from_candidate(
         )
     )
     if existing_idem:
-        _mark_receipt_processed(receipt)
-        db.commit()
-        return _command_reply(
-            db=db,
-            user=user,
-            channel=response_channel,
-            template="event_created",
-            subject=response_subject,
-            status=WebhookStatus.COMMAND_COMPLETED,
-            message="Command already processed",
-            request_id=request_id,
-            mutation_executed=False,
-        )
+        return {
+            "ok": True,
+            "status": "command_completed",
+            "message": "Command already processed",
+            "mutation_executed": False,
+            "reason": "already_processed",
+            "title": candidate.title,
+        }
 
     gate_response = _tenant_gate_for_calendar_mutation(db, request_id, user.household_id, user.household_id)
     if gate_response:
-        return gate_response
+        return {
+            "ok": False,
+            "status": str(gate_response.status),
+            "message": str(gate_response.message),
+            "mutation_executed": False,
+            "reason": "tenant_gate_blocked",
+            "title": candidate.title,
+        }
 
-    event_created = False
+    all_day = _is_all_day_window(candidate.start_at, candidate.end_at, user.timezone) if all_day_override is None else bool(all_day_override)
     try:
         credential, binding = _resolve_calendar_context_with_refresh(db, user.household_id)
         calendar_result = calendar_provider.create_event(
@@ -1570,19 +3653,20 @@ def _create_event_from_candidate(
             start_at=candidate.start_at,
             end_at=candidate.end_at,
             timezone=user.timezone,
+            all_day=all_day,
         )
-        db.add(
-            Event(
-                household_id=user.household_id,
-                source_message_id=source.id,
-                title=candidate.title,
-                start_at=candidate.start_at,
-                end_at=candidate.end_at,
-                timezone=user.timezone,
-                status="calendar_synced",
-                calendar_event_id=calendar_result.calendar_event_id,
-            )
+        event = Event(
+            household_id=user.household_id,
+            source_message_id=source.id,
+            title=candidate.title,
+            start_at=candidate.start_at,
+            end_at=candidate.end_at,
+            timezone=user.timezone,
+            all_day=all_day,
+            status="calendar_synced",
+            calendar_event_id=calendar_result.calendar_event_id,
         )
+        db.add(event)
         db.add(
             IdempotencyKey(
                 key=idem_key,
@@ -1593,58 +3677,27 @@ def _create_event_from_candidate(
                 result_hash=_hash_result("calendar_synced"),
             )
         )
-        event_created = True
-        policy_outcome = {"status": "command_completed", "reason": "event_added"}
-        committed_actions = {"event_created": candidate.title}
-        message = "Added to calendar."
+        db.flush()
     except CalendarMutationError:
-        pending_start = candidate.start_at or (datetime.now(timezone.utc) + timedelta(days=1))
-        db.add(
-            PendingEvent(
-                household_id=user.household_id,
-                event_start=pending_start,
-                expires_at=datetime.now(timezone.utc) + timedelta(days=7),
-                title=candidate.title,
-            )
-        )
-        db.add(
-            IdempotencyKey(
-                key=idem_key,
-                scope="command",
-                household_id=user.household_id,
-                action_type="add",
-                target_ref=candidate.title,
-                result_hash=_hash_result("calendar_retry_needed"),
-            )
-        )
-        policy_outcome = {"status": "command_completed", "reason": "calendar_sync_failed_saved"}
-        committed_actions = {"saved_for_retry": candidate.title}
-        message = "I saved the event, but I couldn't sync it to the calendar right now."
+        return {
+            "ok": False,
+            "status": "command_needs_clarification",
+            "message": "I found the event, but I couldn't add it to the calendar right now. Please try again.",
+            "mutation_executed": False,
+            "reason": "calendar_write_failed",
+            "title": candidate.title,
+        }
 
-    _audit(
-        db,
-        request_id,
-        user.household_id,
-        "info",
-        inputs,
-        model_output,
-        {"valid": True},
-        policy_outcome,
-        committed_actions,
-    )
-    _mark_receipt_processed(receipt)
-    db.commit()
-    return _command_reply(
-        db=db,
-        user=user,
-        channel=response_channel,
-        template="event_created",
-        subject=response_subject,
-        status=WebhookStatus.COMMAND_COMPLETED,
-        message=message,
-        request_id=request_id,
-        mutation_executed=event_created or bool(committed_actions),
-    )
+    return {
+        "ok": True,
+        "status": "command_completed",
+        "message": "Added to calendar.",
+        "mutation_executed": True,
+        "reason": "event_added",
+        "event_id": event.id,
+        "calendar_event_id": event.calendar_event_id,
+        "title": event.title,
+    }
 
 
 def _handle_set_preference_command(
@@ -1699,22 +3752,6 @@ def _handle_set_preference_command(
     )
 
 
-def _followup_items_from_extracted_events(extracted_events: list[ExtractedEvent]) -> list[dict]:
-    return [
-        {
-            "title": event.title,
-            "text": event.title,
-            "start_at": _serialize_dt(event.start_at),
-            "end_at": _serialize_dt(event.end_at),
-            "reason": event.model_reason,
-            "applies_to": [*list(event.mentioned_names or []), *[f"Gr {grade}" for grade in list(event.target_grades or [])]],
-            "target_scope": event.target_scope,
-        }
-        for event in extracted_events
-        if (event.title or "").strip()
-    ]
-
-
 def _handle_add_command(
     db: Session,
     request_id: str,
@@ -1733,339 +3770,86 @@ def _handle_add_command(
     forwarded_subject: str = "",
     forwarded_date: str = "",
 ) -> InboundResponse:
-    inputs = {
-        "subject": subject,
-        "body_text": raw_body_text,
-        "command_topic": command_topic,
-        "response_channel": response_channel,
-    }
-
-    if followup_context is not None:
-        followup_match = resolve_followup_item(
-            followup_context,
-            query_text=command_topic or raw_body_text,
-            topic=command_topic,
-        )
-        if followup_match is not None:
-            followup_candidate = _candidate_from_followup_item(followup_match.item, user.timezone)
-            if followup_candidate and followup_candidate.start_at and followup_candidate.end_at:
-                return _create_event_from_candidate(
-                    db=db,
-                    request_id=request_id,
-                    user=user,
-                    source=source,
-                    receipt=receipt,
-                    provider_message_id=provider_message_id,
-                    response_channel=response_channel,
-                    response_subject=response_subject,
-                    candidate=followup_candidate,
-                    inputs=inputs,
-                    model_output={
-                        "source": "followup_context",
-                        "matched_item": followup_match.item,
-                    },
-                )
-
-    direct_candidate = _extract_direct_add_candidate(raw_body_text, user.timezone)
-    if direct_candidate is not None:
-        return _create_event_from_candidate(
+    content_body_text = analysis_body_text or raw_body_text
+    priority_preferences = load_priority_preferences(db, user.household_id)
+    reference_datetime_hint = _serialize_dt(_parse_forwarded_reference_datetime(forwarded_date, user.timezone)) or ""
+    extraction_result = extract_context_documents(
+        content_body_text=content_body_text,
+        reference_datetime_hint=reference_datetime_hint,
+    )
+    result = resolve_add_request_from_context(
+        raw_body_text=raw_body_text,
+        subject=subject,
+        timezone_name=user.timezone,
+        response_channel=response_channel,
+        command_topic=command_topic,
+        followup_context=followup_context,
+        forwarded_subject=forwarded_subject,
+        forwarded_date=forwarded_date,
+        preference_text=priority_preferences["raw_text"],
+        extraction_result=extraction_result,
+        fallback_command_topic_fn=_fallback_command_topic,
+        extract_direct_add_candidate_fn=_extract_direct_add_candidate,
+        candidate_from_followup_item_fn=_candidate_from_followup_item,
+        resolve_forwarded_add_candidates_fn=_resolve_forwarded_add_candidates,
+        collect_extraction_results_fn=_collect_extraction_results,
+        validate_candidate_fn=validate_candidate,
+        serialize_dt_fn=_serialize_dt,
+        build_candidate_clarification_fn=_build_candidate_clarification,
+        build_past_event_message_fn=_build_past_event_message,
+        past_only_candidates_fn=_past_only_candidates,
+        allows_multiple_add_fn=_allows_multiple_add,
+        create_candidate_event_fn=lambda candidate: _create_event_from_candidate_result(
             db=db,
             request_id=request_id,
             user=user,
             source=source,
-            receipt=receipt,
             provider_message_id=provider_message_id,
-            response_channel=response_channel,
-            response_subject=response_subject,
-            candidate=direct_candidate,
-            inputs=inputs,
-            model_output={"source": "direct_command", "candidate_title": direct_candidate.title},
-        )
-
-    content_body_text = analysis_body_text or raw_body_text
-    candidate_links = extract_candidate_links(content_body_text)
-    link_report = resolve_and_download_links(candidate_links)
-    analysis_text = build_analysis_text(content_body_text, link_report.attachments)
-    if not analysis_text:
-        analysis_text = content_body_text
-    sections, prioritized_chunks = build_prioritized_chunks(content_body_text, link_report.attachments)
-
-    priority_preferences = load_priority_preferences(db, user.household_id)
-    preference_text = priority_preferences["raw_text"]
-    extracted_events, chunk_summaries, chunk_notes, chunk_failures = _collect_extraction_results(
-        prioritized_chunks,
-        subject,
-        preference_text,
-        user.timezone,
+            candidate=candidate,
+        ),
     )
+
+    inputs = {
+        "subject": subject,
+        "body_text": raw_body_text,
+        "command_topic": (command_topic or "").strip() or _fallback_command_topic(raw_body_text) or None,
+        "response_channel": response_channel,
+    }
     audit_model_output = {
         "llm": engine_llm.metadata(),
         "command_parse": command_parse_metadata or None,
-        "analysis": {
-            "links": candidate_links,
-            "link_attempts": [attempt.__dict__ for attempt in link_report.attempts],
-            "attachment_count": len(link_report.attachments),
-            "analysis_char_count": len(analysis_text),
-            "section_summaries": [
-                {
-                    "section_index": section.index,
-                    "label": section.label,
-                    "section_kind": section.section_kind,
-                    "priority_score": section.priority_score,
-                    "source_kind": section.source_kind,
-                    "char_count": len(section.text),
-                }
-                for section in sections
-            ],
-            "chunk_summaries": chunk_summaries,
-            "chunk_failures": chunk_failures,
-        },
     }
+    audit_model_output.update(result.audit_payload)
 
-    if chunk_failures and not extracted_events:
-        _audit(
-            db,
-            request_id,
-            user.household_id,
-            "info",
-            inputs,
-            audit_model_output,
-            {"valid": False, "issues": ["llm_extraction_error"]},
-            {"status": "command_needs_clarification", "reason": "add_extraction_error"},
-            {},
-        )
-        _mark_receipt_processed(receipt)
-        db.commit()
-        return _command_reply(
-            db=db,
-            user=user,
-            channel=response_channel,
-            template="add_clarification",
-            subject=response_subject,
-            status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-            message="I couldn't find a clear event to add from that message. Please forward the event details again or be more specific.",
-            request_id=request_id,
-            mutation_executed=False,
-        )
+    template = "event_created"
+    if result.status == "command_needs_clarification":
+        template = "add_clarification"
+    elif result.status == "command_noop_past_event":
+        template = "add_past_event"
 
-    actionable_candidates: list[ExtractedEvent] = []
-    candidate_outcomes: list[dict] = []
-    for candidate in extracted_events:
-        validation = validate_candidate(candidate)
-        candidate_outcomes.append(
-            {
-                "title": candidate.title,
-                "start_at": _serialize_dt(candidate.start_at),
-                "end_at": _serialize_dt(candidate.end_at),
-                "validation": validation,
-            }
-        )
-        if validation["valid"]:
-            actionable_candidates.append(candidate)
-
-    audit_model_output["events"] = candidate_outcomes
-    if chunk_notes:
-        audit_model_output["email_level_notes"] = "\n".join(chunk_notes)
-
-    resolved_candidates, resolution_audit = _resolve_forwarded_add_candidates(
-        extracted_events=extracted_events,
-        command_topic=command_topic,
-        content_body_text=content_body_text,
-        forwarded_subject=forwarded_subject or subject,
-        forwarded_date=forwarded_date,
-        timezone_name=user.timezone,
+    _audit(
+        db,
+        request_id,
+        user.household_id,
+        "info",
+        inputs,
+        audit_model_output,
+        result.audit_validation,
+        result.audit_policy_outcome,
+        result.audit_committed_actions,
     )
-    if resolved_candidates:
-        actionable_candidates = []
-        candidate_outcomes = []
-        for candidate in resolved_candidates:
-            validation = validate_candidate(candidate)
-            candidate_outcomes.append(
-                {
-                    "title": candidate.title,
-                    "start_at": _serialize_dt(candidate.start_at),
-                    "end_at": _serialize_dt(candidate.end_at),
-                    "validation": validation,
-                }
-            )
-            if validation["valid"]:
-                actionable_candidates.append(candidate)
-        audit_model_output["resolved_candidates"] = candidate_outcomes
-        audit_model_output["command_resolution"] = resolution_audit
-
-    if not actionable_candidates:
-        past_candidates = _past_only_candidates(resolved_candidates or extracted_events)
-        if past_candidates:
-            _audit(
-                db,
-                request_id,
-                user.household_id,
-                "info",
-                inputs,
-                audit_model_output,
-                {"valid": False, "issues": ["event_in_past"]},
-                {"status": "command_noop_past_event", "reason": "event_in_past"},
-                {},
-            )
-            _mark_receipt_processed(receipt)
-            db.commit()
-            return _command_reply(
-                db=db,
-                user=user,
-                channel=response_channel,
-                template="add_past_event",
-                subject=response_subject,
-                status=WebhookStatus.COMMAND_NOOP_PAST_EVENT,
-                message=_build_past_event_message(past_candidates, user.timezone),
-                request_id=request_id,
-                mutation_executed=False,
-            )
-        _audit(
-            db,
-            request_id,
-            user.household_id,
-            "info",
-            inputs,
-            audit_model_output,
-            {"valid": False, "issues": ["no_actionable_event"]},
-            {"status": "command_needs_clarification", "reason": "no_actionable_event"},
-            {},
-        )
-        _mark_receipt_processed(receipt)
-        db.commit()
-        return _command_reply(
-            db=db,
-            user=user,
-            channel=response_channel,
-            template="add_clarification",
-            subject=response_subject,
-            status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-            message="I couldn't find a clear future event to add from that message. Please reply with the exact event details you want added.",
-            request_id=request_id,
-            mutation_executed=False,
-        )
-
-    if len(actionable_candidates) > 1:
-        if _allows_multiple_add(command_topic or raw_body_text):
-            created_titles: list[str] = []
-            skipped_past = _past_only_candidates(resolved_candidates)
-            for candidate in actionable_candidates:
-                single_idem_key = f"{provider_message_id}:add:{candidate.title}:{candidate.start_at}:{candidate.end_at}"
-                existing_idem = db.scalar(
-                    select(IdempotencyKey).where(
-                        IdempotencyKey.key == single_idem_key,
-                        IdempotencyKey.scope == "command",
-                        IdempotencyKey.household_id == user.household_id,
-                    )
-                )
-                if existing_idem:
-                    created_titles.append(candidate.title)
-                    continue
-                gate_response = _tenant_gate_for_calendar_mutation(db, request_id, user.household_id, user.household_id)
-                if gate_response:
-                    return gate_response
-                credential, binding = _resolve_calendar_context_with_refresh(db, user.household_id)
-                calendar_result = calendar_provider.create_event(
-                    access_token=credential.access_token,
-                    calendar_id=binding.calendar_id,
-                    title=candidate.title,
-                    start_at=candidate.start_at,
-                    end_at=candidate.end_at,
-                    timezone=user.timezone,
-                )
-                db.add(
-                    Event(
-                        household_id=user.household_id,
-                        source_message_id=source.id,
-                        title=candidate.title,
-                        start_at=candidate.start_at,
-                        end_at=candidate.end_at,
-                        timezone=user.timezone,
-                        status="calendar_synced",
-                        calendar_event_id=calendar_result.calendar_event_id,
-                    )
-                )
-                db.add(
-                    IdempotencyKey(
-                        key=single_idem_key,
-                        scope="command",
-                        household_id=user.household_id,
-                        action_type="add",
-                        target_ref=candidate.title,
-                        result_hash=_hash_result("calendar_synced"),
-                    )
-                )
-                created_titles.append(candidate.title)
-            _audit(
-                db,
-                request_id,
-                user.household_id,
-                "info",
-                inputs,
-                audit_model_output,
-                {"valid": True},
-                {"status": "command_completed", "reason": "multiple_events_added"},
-                {"events_created": created_titles, "past_events_skipped": [item.title for item in skipped_past]},
-            )
-            _mark_receipt_processed(receipt)
-            db.commit()
-            message = f"Added {len(created_titles)} events to calendar."
-            if skipped_past:
-                message += f" Skipped {len(skipped_past)} past event(s)."
-            return _command_reply(
-                db=db,
-                user=user,
-                channel=response_channel,
-                template="event_created",
-                subject=response_subject,
-                status=WebhookStatus.COMMAND_COMPLETED,
-                message=message,
-                request_id=request_id,
-                mutation_executed=bool(created_titles),
-            )
-        _audit(
-            db,
-            request_id,
-            user.household_id,
-            "info",
-            inputs,
-            audit_model_output,
-            {"valid": False, "issues": ["multiple_actionable_events"]},
-            {"status": "command_needs_clarification", "reason": "multiple_actionable_events"},
-            {},
-        )
-        _mark_receipt_processed(receipt)
-        db.commit()
-        return _command_reply(
-            db=db,
-            user=user,
-            channel=response_channel,
-            template="add_clarification",
-            subject=response_subject,
-            status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-            message=_build_candidate_clarification(actionable_candidates, user.timezone),
-            request_id=request_id,
-            mutation_executed=False,
-        )
-
-    candidate = actionable_candidates[0]
-    audit_model_output["selected_event"] = {
-        "title": candidate.title,
-        "start_at": _serialize_dt(candidate.start_at),
-        "end_at": _serialize_dt(candidate.end_at),
-    }
-    return _create_event_from_candidate(
+    _mark_receipt_processed(receipt)
+    db.commit()
+    return _command_reply(
         db=db,
-        request_id=request_id,
         user=user,
-        source=source,
-        receipt=receipt,
-        provider_message_id=provider_message_id,
-        response_channel=response_channel,
-        response_subject=response_subject,
-        candidate=candidate,
-        inputs=inputs,
-        model_output=audit_model_output,
+        channel=response_channel,
+        template=template,
+        subject=response_subject,
+        status=_tool_status_to_webhook(result.status),
+        message=result.message,
+        request_id=request_id,
+        mutation_executed=result.mutation_executed,
     )
 
 
@@ -2078,8 +3862,10 @@ def _b64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + padding)
 
 
-def _build_oauth_state(household_id: int = 1) -> str:
-    payload = {"household_id": household_id, "nonce": str(uuid.uuid4())}
+def _build_oauth_state(household_id: int = 1, next_url: str | None = None) -> str:
+    payload: dict = {"household_id": household_id, "nonce": str(uuid.uuid4())}
+    if next_url and next_url.startswith("/"):
+        payload["next_url"] = next_url
     payload_raw = json.dumps(payload, separators=(",", ":")).encode()
     payload_token = _b64url_encode(payload_raw)
     signature = hmac.new(settings.webhook_secret.encode(), payload_token.encode(), hashlib.sha256).digest()
@@ -2139,6 +3925,7 @@ def inbound_email(
             processing_state=ProcessingState.COMPLETED.value,
         )
 
+    attribution = resolve_admin_sender(db, payload.sender)
     receipt = WebhookReceipt(
         provider=payload.provider,
         provider_event_id=payload.provider_event_id,
@@ -2146,8 +3933,6 @@ def inbound_email(
         status="received",
     )
     db.add(receipt)
-
-    attribution = resolve_admin_sender(db, payload.sender)
     if attribution.kind == "unverified":
         _audit(
             db,
@@ -2193,6 +3978,24 @@ def inbound_email(
     user = attribution.user
     assert user is not None
 
+    email_intent = _classify_email_intent(payload.body_text)
+    content_body_text = email_intent.forwarded_body_text or payload.body_text
+    candidate_links = extract_candidate_links(content_body_text)
+    link_report = resolve_and_download_links(candidate_links)
+    resend_attachments = (
+        _download_resend_pdf_attachments(payload.email_id)
+        if payload.provider == "resend" and payload.email_id
+        else []
+    )
+    analysis_attachments = list(link_report.attachments) + list(resend_attachments)
+    thread_key = str(payload.thread_key or "").strip() or resolve_email_thread_key(
+        db,
+        household_id=user.household_id,
+        internet_message_id=payload.internet_message_id or payload.provider_message_id,
+        in_reply_to_message_id=payload.in_reply_to_message_id,
+        references_header=payload.references_header,
+        fallback_key=payload.provider_message_id,
+    )
     source = SourceMessage(
         provider=payload.provider,
         provider_message_id=payload.provider_message_id,
@@ -2201,53 +4004,109 @@ def inbound_email(
         household_id=user.household_id,
         subject=payload.subject,
         body_text=payload.body_text,
+        internet_message_id=(payload.internet_message_id or payload.provider_message_id).strip() or None,
+        in_reply_to_message_id=(payload.in_reply_to_message_id or "").strip() or None,
+        references_header=(payload.references_header or "").strip(),
+        thread_key=thread_key,
     )
     db.add(source)
     db.flush()
-
-    email_intent = _classify_email_intent(payload.body_text)
+    db.commit()
+    if analysis_attachments:
+        persist_thread_documents(
+            db,
+            household_id=user.household_id,
+            source_message_id=source.id,
+            thread_key=source.thread_key,
+            attachments=analysis_attachments,
+            openai_api_key=settings.openai_api_key,
+            openai_base_url=settings.openai_base_url,
+            openai_timeout_sec=settings.openai_timeout_sec,
+        )
+        db.commit()
+    thread_documents = load_thread_documents(db, household_id=user.household_id, thread_key=source.thread_key)
+    household = db.scalar(select(Household).where(Household.id == user.household_id))
+    priority_preferences = load_priority_preferences(db, user.household_id)
+    preference_text = priority_preferences["raw_text"]
+    children = db.scalars(select(Child).where(Child.household_id == user.household_id, Child.status == "active")).all()
+    agent_household_context = _build_agent_household_context(
+        db,
+        user=user,
+        household=household,
+        children=children,
+        priority_preferences=priority_preferences,
+    )
+    db.commit()
 
     parsed_email_command = None
     forwarded_preface_intent = None
     command_body_text = email_intent.user_preface_text
-    if email_intent.mode == "command_candidate":
-        parse_source_text = email_intent.user_preface_text or payload.body_text
-        try:
-            parsed_email_command = engine_llm.parse_command(parse_source_text)
-        except Exception:
-            parsed_email_command = None
-    elif email_intent.mode == "forwarded_preface_candidate":
-        try:
-            forwarded_preface_intent = engine_llm.parse_forwarded_preface_intent(
-                user_preface=email_intent.user_preface_text,
-                forwarded_subject=email_intent.forwarded_subject,
-                forwarded_sender=email_intent.forwarded_sender,
-                forwarded_date=email_intent.forwarded_date,
-            )
-        except Exception as exc:
-            _audit(
-                db,
-                request_id,
-                user.household_id,
-                "high",
-                payload.model_dump(),
-                {
-                    "llm": engine_llm.metadata(),
-                    "email_intent": _email_intent_metadata(email_intent),
-                },
-                {"valid": False, "issues": ["llm_forwarded_intent_parse_error"]},
-                {"status": "command_parse_error", "detail": exc.__class__.__name__},
-                {},
-            )
-            _mark_receipt_processed(receipt)
-            db.commit()
-            return InboundResponse(
-                status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION.value,
-                message="I saw your note above the forwarded email, but I couldn't interpret the request. Reply with what you'd like me to do.",
-                request_id=request_id,
-                mutation_executed=False,
-                processing_state=ProcessingState.COMPLETED.value,
-            )
+    with _conversation_runtime_scope(
+        source=source,
+        thread_documents=thread_documents,
+        household_context=agent_household_context,
+    ):
+        if email_intent.mode == "command_candidate":
+            parse_source_text = email_intent.user_preface_text or payload.body_text
+            try:
+                parsed_email_command = engine_llm.parse_command(parse_source_text)
+            except Exception:
+                parsed_email_command = None
+        elif email_intent.mode == "forwarded_preface_candidate":
+            parse_source_text = email_intent.user_preface_text or ""
+            if parse_source_text:
+                try:
+                    parsed_email_command = engine_llm.parse_command(parse_source_text)
+                except Exception:
+                    parsed_email_command = None
+            try:
+                forwarded_preface_intent = engine_llm.parse_forwarded_preface_intent(
+                    user_preface=email_intent.user_preface_text,
+                    forwarded_subject=email_intent.forwarded_subject,
+                    forwarded_sender=email_intent.forwarded_sender,
+                    forwarded_date=email_intent.forwarded_date,
+                )
+            except Exception as exc:
+                if parsed_email_command is not None and _should_accept_plain_email_command(parsed_email_command):
+                    forwarded_preface_intent = None
+                else:
+                    response_channel = resolve_response_channel(
+                        origin_channel="email",
+                        email_intent_mode="command",
+                        admin_phone=user.phone,
+                    )
+                    response_subject = _reply_subject(payload.subject)
+                    _audit(
+                        db,
+                        request_id,
+                        user.household_id,
+                        "high",
+                        payload.model_dump(),
+                        {
+                            "llm": engine_llm.metadata(),
+                            "email_intent": _email_intent_metadata(email_intent),
+                            "conversation": {
+                                "session_id": _source_session_id(source),
+                                "thread_key": source.thread_key,
+                                "thread_document_count": len(thread_documents),
+                            },
+                        },
+                        {"valid": False, "issues": ["llm_forwarded_intent_parse_error"]},
+                        {"status": "command_parse_error", "detail": exc.__class__.__name__},
+                        {},
+                    )
+                    _mark_receipt_processed(receipt)
+                    return _command_reply(
+                        db=db,
+                        user=user,
+                        channel=response_channel,
+                        template="command_clarification",
+                        subject=response_subject,
+                        status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+                        message="I saw your note above the forwarded email, but I couldn't interpret the request. Reply with what you'd like me to do.",
+                        request_id=request_id,
+                        mutation_executed=False,
+                    )
 
     if (
         email_intent.mode == "forwarded_preface_candidate"
@@ -2280,10 +4139,17 @@ def inbound_email(
             processing_state=ProcessingState.COMPLETED.value,
         )
 
+    prefer_direct_preface_command = (
+        email_intent.mode == "forwarded_preface_candidate"
+        and _should_prefer_direct_preface_command(parsed_email_command)
+    )
+
     should_run_command = (
         email_intent.mode == "command_candidate"
         and parsed_email_command is not None
         and _should_accept_plain_email_command(parsed_email_command)
+    ) or (
+        prefer_direct_preface_command
     ) or (
         email_intent.mode == "forwarded_preface_candidate"
         and forwarded_preface_intent is not None
@@ -2292,142 +4158,223 @@ def inbound_email(
     )
 
     if should_run_command:
-        response_channel = resolve_response_channel(
-            origin_channel="email",
-            email_intent_mode="command",
-            admin_phone=user.phone,
-        )
-        response_subject = _reply_subject(payload.subject)
-        command = parsed_email_command or forwarded_preface_intent or {}
-        strategy = _command_execution_strategy(command)
+        with _conversation_runtime_scope(
+            source=source,
+            thread_documents=thread_documents,
+            household_context=agent_household_context,
+        ):
+            response_channel = resolve_response_channel(
+                origin_channel="email",
+                email_intent_mode="command",
+                admin_phone=user.phone,
+            )
+            response_subject = _reply_subject(payload.subject)
+            if email_intent.mode == "command_candidate" or prefer_direct_preface_command:
+                command = parsed_email_command or {}
+            else:
+                command = forwarded_preface_intent or parsed_email_command or {}
+            strategy = _command_execution_strategy(command)
 
-        if strategy == "deterministic" and command["action"] == "add":
-            followup_context = load_active_followup_context(
-                db,
-                household_id=user.household_id,
-                response_channel=response_channel,
-            )
-            return _handle_add_command(
-                db=db,
-                request_id=request_id,
-                user=user,
-                source=source,
-                receipt=receipt,
-                provider_message_id=payload.provider_message_id,
-                subject=payload.subject,
-                raw_body_text=command_body_text or payload.body_text,
-                analysis_body_text=email_intent.forwarded_body_text or payload.body_text,
-                response_channel=response_channel,
-                response_subject=response_subject,
-                followup_context=followup_context,
-                command_topic=command.get("topic"),
-                command_parse_metadata=command,
-                forwarded_subject=email_intent.forwarded_subject,
-                forwarded_date=email_intent.forwarded_date,
-            )
-        if strategy == "semantic" and command["action"] == "more_info":
-            context = load_active_followup_context(
-                db,
-                household_id=user.household_id,
-                response_channel=response_channel,
-            )
-            _mark_receipt_processed(receipt)
-            db.commit()
-            more_info = _handle_more_info_command(
-                request_id=request_id,
-                topic=command.get("topic"),
-                context=context,
-            )
-            return _command_reply(
-                db=db,
-                user=user,
-                channel=response_channel,
-                template="more_info",
-                subject=response_subject,
-                status=WebhookStatus(more_info.status),
-                message=more_info.message,
-                request_id=request_id,
-                mutation_executed=False,
-            )
+            if command.get("action") in {"more_info", "update", "delete", "remind", "set_preference"} or (
+                command.get("action") == "add" and email_intent.mode == "command_candidate"
+            ):
+                tool_response = _run_command_tools(
+                    db=db,
+                    request_id=request_id,
+                    user=user,
+                    source=source,
+                    receipt=receipt,
+                    response_channel=response_channel,
+                    response_subject=response_subject,
+                    provider_message_id=payload.provider_message_id,
+                    subject=payload.subject,
+                    raw_message_text=command_body_text or payload.body_text,
+                    analysis_message_text=email_intent.forwarded_body_text or payload.body_text,
+                    forwarded_subject=email_intent.forwarded_subject,
+                    forwarded_date=email_intent.forwarded_date,
+                    command=command,
+                    allow_add_fallback=command.get("action") == "add",
+                )
+                if tool_response is not None:
+                    return tool_response
 
-        if strategy == "deterministic" and command["action"] == "set_preference":
-            return _handle_set_preference_command(
-                db=db,
-                request_id=request_id,
-                user=user,
-                receipt=receipt,
-                response_channel=response_channel,
-                response_subject=response_subject,
-                topic=command.get("topic"),
-                preference_behavior=command.get("preference_behavior"),
-            )
-
-        if strategy == "deterministic" and command["action"] == "delete":
-            event_id = command["pending_id"]
-            if event_id is None:
+            if strategy == "deterministic" and command["action"] == "add":
+                followup_context = load_active_followup_context(
+                    db,
+                    household_id=user.household_id,
+                    response_channel=response_channel,
+                    thread_or_conversation_key=_followup_context_key(source),
+                )
+                return _handle_add_command(
+                    db=db,
+                    request_id=request_id,
+                    user=user,
+                    source=source,
+                    receipt=receipt,
+                    provider_message_id=payload.provider_message_id,
+                    subject=payload.subject,
+                    raw_body_text=command_body_text or payload.body_text,
+                    analysis_body_text=email_intent.forwarded_body_text or payload.body_text,
+                    response_channel=response_channel,
+                    response_subject=response_subject,
+                    followup_context=followup_context,
+                    command_topic=command.get("topic"),
+                    command_parse_metadata=command,
+                    forwarded_subject=email_intent.forwarded_subject,
+                    forwarded_date=email_intent.forwarded_date,
+                )
+            if strategy == "semantic" and command["action"] == "more_info":
+                context = load_active_followup_context(
+                    db,
+                    household_id=user.household_id,
+                    response_channel=response_channel,
+                    thread_or_conversation_key=_followup_context_key(source),
+                )
                 _mark_receipt_processed(receipt)
                 db.commit()
+                more_info = _handle_more_info_command(
+                    db=db,
+                    request_id=request_id,
+                    topic=command.get("topic"),
+                    context=context,
+                )
                 return _command_reply(
                     db=db,
                     user=user,
                     channel=response_channel,
-                    template="delete_clarification",
+                    template="more_info",
                     subject=response_subject,
-                    status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-                    message="Please include event id to delete.",
+                    status=WebhookStatus(more_info.status),
+                    message=more_info.message,
                     request_id=request_id,
                     mutation_executed=False,
                 )
-            event = db.scalar(select(Event).where(Event.id == event_id))
-            if not event:
-                _mark_receipt_processed(receipt)
-                db.commit()
-                return _command_reply(
+
+            if strategy == "deterministic" and command["action"] == "set_preference":
+                return _handle_set_preference_command(
                     db=db,
-                    user=user,
-                    channel=response_channel,
-                    template="delete_clarification",
-                    subject=response_subject,
-                    status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-                    message="Event not found.",
                     request_id=request_id,
-                    mutation_executed=False,
-                )
-
-            gate_response = _tenant_gate_for_calendar_mutation(
-                db,
-                request_id,
-                user.household_id,
-                event.household_id,
-            )
-            if gate_response:
-                return gate_response
-
-            if not event.calendar_event_id:
-                _mark_receipt_processed(receipt)
-                db.commit()
-                return _command_reply(
-                    db=db,
                     user=user,
-                    channel=response_channel,
-                    template="delete_clarification",
-                    subject=response_subject,
-                    status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-                    message="Event is not linked to Google Calendar.",
-                    request_id=request_id,
-                    mutation_executed=False,
+                    receipt=receipt,
+                    response_channel=response_channel,
+                    response_subject=response_subject,
+                    topic=command.get("topic"),
+                    preference_behavior=command.get("preference_behavior"),
                 )
 
-            credential, binding = _resolve_calendar_context_with_refresh(db, user.household_id)
-            idem_key = f"{payload.provider_message_id}:delete:{event.id}"
-            existing_idem = db.scalar(
-                select(IdempotencyKey).where(
-                    IdempotencyKey.key == idem_key,
-                    IdempotencyKey.scope == "command",
-                    IdempotencyKey.household_id == user.household_id,
+            if strategy == "deterministic" and command["action"] == "delete":
+                event_id = command["event_id"]
+                if event_id is None:
+                    _mark_receipt_processed(receipt)
+                    db.commit()
+                    return _command_reply(
+                        db=db,
+                        user=user,
+                        channel=response_channel,
+                        template="delete_clarification",
+                        subject=response_subject,
+                        status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+                        message="Please include event id to delete.",
+                        request_id=request_id,
+                        mutation_executed=False,
+                    )
+                event = db.scalar(select(Event).where(Event.id == event_id))
+                if not event:
+                    _mark_receipt_processed(receipt)
+                    db.commit()
+                    return _command_reply(
+                        db=db,
+                        user=user,
+                        channel=response_channel,
+                        template="delete_clarification",
+                        subject=response_subject,
+                        status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+                        message="Event not found.",
+                        request_id=request_id,
+                        mutation_executed=False,
+                    )
+
+                gate_response = _tenant_gate_for_calendar_mutation(
+                    db,
+                    request_id,
+                    user.household_id,
+                    event.household_id,
                 )
-            )
-            if existing_idem:
+                if gate_response:
+                    return gate_response
+
+                if not event.calendar_event_id:
+                    _mark_receipt_processed(receipt)
+                    db.commit()
+                    return _command_reply(
+                        db=db,
+                        user=user,
+                        channel=response_channel,
+                        template="delete_clarification",
+                        subject=response_subject,
+                        status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+                        message="Event is not linked to Google Calendar.",
+                        request_id=request_id,
+                        mutation_executed=False,
+                    )
+
+                credential, binding = _resolve_calendar_context_with_refresh(db, user.household_id)
+                idem_key = f"{payload.provider_message_id}:delete:{event.id}"
+                existing_idem = db.scalar(
+                    select(IdempotencyKey).where(
+                        IdempotencyKey.key == idem_key,
+                        IdempotencyKey.scope == "command",
+                        IdempotencyKey.household_id == user.household_id,
+                    )
+                )
+                if existing_idem:
+                    _mark_receipt_processed(receipt)
+                    db.commit()
+                    return _command_reply(
+                        db=db,
+                        user=user,
+                        channel=response_channel,
+                        template="event_deleted",
+                        subject=response_subject,
+                        status=WebhookStatus.COMMAND_COMPLETED,
+                        message="Command already processed",
+                        request_id=request_id,
+                        mutation_executed=False,
+                    )
+
+                try:
+                    calendar_provider.delete_event(
+                        access_token=credential.access_token,
+                        calendar_id=binding.calendar_id,
+                        calendar_event_id=event.calendar_event_id,
+                    )
+                except CalendarMutationError:
+                    _mark_receipt_processed(receipt)
+                    db.commit()
+                    return _command_reply(
+                        db=db,
+                        user=user,
+                        channel=response_channel,
+                        template="delete_clarification",
+                        subject=response_subject,
+                        status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+                        message="Unable to delete event from calendar. Please try again.",
+                        request_id=request_id,
+                        mutation_executed=False,
+                    )
+
+                event.status = "deleted"
+                event.version += 1
+                db.add(
+                    IdempotencyKey(
+                        key=idem_key,
+                        scope="command",
+                        household_id=user.household_id,
+                        action_type="delete",
+                        target_ref=str(event.id),
+                        result_hash=_hash_result("deleted"),
+                    )
+                )
                 _mark_receipt_processed(receipt)
                 db.commit()
                 return _command_reply(
@@ -2437,91 +4384,65 @@ def inbound_email(
                     template="event_deleted",
                     subject=response_subject,
                     status=WebhookStatus.COMMAND_COMPLETED,
-                    message="Command already processed",
+                    message="Event deleted",
                     request_id=request_id,
-                    mutation_executed=False,
+                    mutation_executed=True,
                 )
 
-            try:
-                calendar_provider.delete_event(
-                    access_token=credential.access_token,
-                    calendar_id=binding.calendar_id,
-                    calendar_event_id=event.calendar_event_id,
-                )
-            except CalendarMutationError:
-                _mark_receipt_processed(receipt)
-                db.commit()
-                return _command_reply(
+            if strategy == "deterministic" and command["action"] == "remind":
+                return _handle_reminder_command(
                     db=db,
-                    user=user,
-                    channel=response_channel,
-                    template="delete_clarification",
-                    subject=response_subject,
-                    status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-                    message="Unable to delete event from calendar. Please try again.",
                     request_id=request_id,
-                    mutation_executed=False,
+                    command=command,
+                    user=user,
+                    provider_message_id=payload.provider_message_id,
+                    receipt=receipt,
+                    response_channel=response_channel,
+                    response_subject=response_subject,
                 )
 
-            event.status = "deleted"
-            event.version += 1
-            db.add(
-                IdempotencyKey(
-                    key=idem_key,
-                    scope="command",
-                    household_id=user.household_id,
-                    action_type="delete",
-                    target_ref=str(event.id),
-                    result_hash=_hash_result("deleted"),
-                )
-            )
             _mark_receipt_processed(receipt)
             db.commit()
             return _command_reply(
                 db=db,
                 user=user,
                 channel=response_channel,
-                template="event_deleted",
+                template="command_clarification",
                 subject=response_subject,
-                status=WebhookStatus.COMMAND_COMPLETED,
-                message="Event deleted",
+                status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+                message="I understood the request, but this command needs a different follow-up flow.",
                 request_id=request_id,
-                mutation_executed=True,
+                mutation_executed=False,
             )
 
-        if strategy == "deterministic" and command["action"] == "remind":
-            return _handle_reminder_command(
-                db=db,
-                request_id=request_id,
-                command=command,
-                user=user,
-                provider_message_id=payload.provider_message_id,
-                receipt=receipt,
-                response_channel=response_channel,
-                response_subject=response_subject,
-            )
-
-        _mark_receipt_processed(receipt)
-        db.commit()
-        return _command_reply(
-            db=db,
-            user=user,
-            channel=response_channel,
-            template="command_clarification",
-            subject=response_subject,
-            status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-            message="I understood the request, but this command needs a different follow-up flow.",
-            request_id=request_id,
-            mutation_executed=False,
-        )
-
-    content_body_text = email_intent.forwarded_body_text or payload.body_text
-    candidate_links = extract_candidate_links(content_body_text)
-    link_report = resolve_and_download_links(candidate_links)
-    analysis_text = build_analysis_text(content_body_text, link_report.attachments)
+    analysis_text = build_analysis_text(content_body_text, analysis_attachments)
     if not analysis_text:
         analysis_text = content_body_text
-    sections, prioritized_chunks = build_prioritized_chunks(content_body_text, link_report.attachments)
+    reference_datetime_hint = _serialize_dt(_parse_forwarded_reference_datetime(email_intent.forwarded_date, user.timezone)) or ""
+    document_understanding = None
+    with _conversation_runtime_scope(
+        source=source,
+        thread_documents=thread_documents,
+        household_context=agent_household_context,
+    ):
+        try:
+            document_understanding = engine_llm.understand_document(
+                analysis_text=analysis_text,
+                subject=payload.subject,
+                household_preferences=preference_text,
+                timezone_hint=user.timezone,
+                reference_datetime_hint=reference_datetime_hint,
+                forwarded_subject=email_intent.forwarded_subject,
+                forwarded_sender=email_intent.forwarded_sender,
+                forwarded_date=email_intent.forwarded_date,
+            )
+        except Exception:
+            document_understanding = None
+    sections, prioritized_chunks = build_prioritized_chunks(
+        content_body_text,
+        analysis_attachments,
+        priority_terms=_document_understanding_priority_terms(document_understanding),
+    )
     section_summaries = [
         {
             "section_index": section.index,
@@ -2534,60 +4455,60 @@ def inbound_email(
         for section in sections
     ]
 
-    priority_preferences = load_priority_preferences(db, user.household_id)
-    preference_text = priority_preferences["raw_text"]
-    children = db.scalars(select(Child).where(Child.household_id == user.household_id, Child.status == "active")).all()
-    extracted_events, chunk_summaries, chunk_notes, chunk_failures = _collect_extraction_results(
-        prioritized_chunks,
-        payload.subject,
-        preference_text,
-        user.timezone,
-    )
+    sender_email_hint, sender_name_hint = _normalized_sender_identity(email_intent.forwarded_sender or payload.sender)
+    _append_user_turn_to_session(db, source)
+    db.commit()
+    with _conversation_runtime_scope(
+        source=source,
+        thread_documents=thread_documents,
+        household_context=agent_household_context,
+    ):
+        extracted_events, chunk_summaries, chunk_notes, chunk_failures = _collect_extraction_results(
+            prioritized_chunks,
+            payload.subject,
+            preference_text,
+            user.timezone,
+            reference_datetime_hint=reference_datetime_hint,
+            document_understanding=document_understanding,
+        )
     analysis_audit = {
         "links": candidate_links,
         "link_attempts": [attempt.__dict__ for attempt in link_report.attempts],
-        "attachment_count": len(link_report.attachments),
+        "attachment_count": len(analysis_attachments),
         "analysis_char_count": len(analysis_text),
+        "document_understanding": document_understanding,
         "section_summaries": section_summaries,
         "chunk_summaries": chunk_summaries,
         "chunk_failures": chunk_failures,
     }
-    if chunk_failures and not extracted_events:
-        _audit(
-            db,
-            request_id,
-            user.household_id,
-            "high",
-            payload.model_dump(),
-            {
-                "llm": engine_llm.metadata(),
-                "email_intent": _email_intent_metadata(email_intent),
-                "forwarded_preface_intent": forwarded_preface_intent,
-                "analysis": analysis_audit,
-            },
-            {"valid": False, "issues": ["llm_extraction_error"]},
-            {"status": "rejected_validation", "detail": chunk_failures[0]["detail"]},
-            {},
-        )
-        _mark_receipt_processed(receipt)
-        db.commit()
-        return _safe_error(WebhookStatus.REJECTED_VALIDATION, request_id, "Could not validate event details.")
     if not extracted_events:
-        summary_result, summary_audit = build_brief_summary(
-            engine=engine_llm,
-            subject=payload.subject,
-            timezone_name=user.timezone,
-            household_preferences=preference_text,
-            system_defaults={item["key"]: bool(item["enabled"]) for item in priority_preferences["system_defaults"]},
-            user_priority_topics=list(priority_preferences["user_priority_topics"]),
-            children=children,
-            extracted_events=[],
-            per_event_outcomes=[],
-            sections=sections,
-            analysis_text=analysis_text,
-            chunk_notes=chunk_notes,
-        )
+        with _conversation_runtime_scope(
+            source=source,
+            thread_documents=thread_documents,
+            household_context=agent_household_context,
+        ):
+            summary_result, summary_audit = build_brief_summary(
+                engine=engine_llm,
+                subject=payload.subject,
+                timezone_name=user.timezone,
+                household_preferences=preference_text,
+                system_defaults={item["key"]: bool(item["enabled"]) for item in priority_preferences["system_defaults"]},
+                user_priority_topics=list(priority_preferences["user_priority_topics"]),
+                suppressed_priority_topics=list(priority_preferences["effective_suppressed_priority_topics"]),
+                children=children,
+                extracted_events=[],
+                per_event_outcomes=[],
+                sections=sections,
+                analysis_text=analysis_text,
+                chunk_notes=chunk_notes,
+                informational_only=None,
+                reference_datetime_hint=reference_datetime_hint,
+                document_understanding=document_understanding,
+            )
         if _summary_has_content(summary_result):
+            validator_issues = ["empty_extraction_informational_fallback"]
+            if chunk_failures:
+                validator_issues.insert(0, "llm_extraction_error")
             response_channel = resolve_response_channel(
                 origin_channel="email",
                 email_intent_mode=email_intent.mode,
@@ -2604,13 +4525,9 @@ def inbound_email(
                 )
             )
             _mark_receipt_processed(receipt)
-            _send_user_response(
-                db=db,
-                user=user,
-                channel=response_channel,
-                template="email_analysis_recap",
-                subject=f"LovelyChaos: {_display_subject(payload.subject)}",
-                message=summary_result.rendered_message,
+            document_followup_items = _document_topics_to_followup_items(
+                document_understanding,
+                source_message_id=source.id,
             )
             persist_followup_context(
                 db,
@@ -2618,22 +4535,21 @@ def inbound_email(
                 source_message_id=source.id,
                 origin_channel="email",
                 response_channel=response_channel,
-                thread_or_conversation_key=payload.provider_message_id,
+                thread_or_conversation_key=_followup_context_key(source),
                 summary_title=summary_result.title,
-                summary_items_shown=[
-                    *[item.as_dict() for item in summary_result.important_dates],
-                    *[item.as_dict() for item in summary_result.important_items],
-                    *[item.as_dict() for item in summary_result.other_topics],
-                ],
-                all_extracted_items=[],
-                section_snippets=[
-                    {
-                        "label": item.get("label"),
-                        "text": item.get("text"),
-                    }
-                    for item in list(summary_audit.get("prefilter", {}).get("kept_sections") or [])
-                    if item.get("text")
-                ],
+                summary_items_shown=_followup_summary_items(summary_result, document_followup_items),
+                actionable_items=document_followup_items,
+                section_snippets=(
+                    [
+                        {
+                            "label": item.get("label"),
+                            "text": item.get("text"),
+                        }
+                        for item in list(summary_audit.get("prefilter", {}).get("kept_sections") or [])
+                        if item.get("text")
+                    ]
+                    + _document_understanding_section_snippets(document_understanding)
+                ),
             )
             _audit(
                 db,
@@ -2645,14 +4561,31 @@ def inbound_email(
                     "llm": engine_llm.metadata(),
                     "email_intent": _email_intent_metadata(email_intent),
                     "forwarded_preface_intent": forwarded_preface_intent,
+                    "conversation": {
+                        "session_id": _source_session_id(source),
+                        "thread_key": source.thread_key,
+                        "thread_document_count": len(thread_documents),
+                    },
                     "analysis": analysis_audit,
                     "summary": summary_audit,
                 },
-                {"valid": True, "issues": ["empty_extraction_informational_fallback"]},
-                {"status": "processed", "counts": {"create_event": 0, "pending_event": 0, "informational_item": 1}},
+                {"valid": True, "issues": validator_issues},
+                {"status": "processed", "counts": {"event_created": 0, "followup_available": 0, "info_stored": 1}},
                 {"informational_fallback": "stored"},
             )
-            db.commit()
+            with _conversation_runtime_scope(
+                source=source,
+                thread_documents=thread_documents,
+                household_context=agent_household_context,
+            ):
+                _commit_then_send_user_response(
+                    db=db,
+                    user=user,
+                    channel=response_channel,
+                    template="email_analysis_recap",
+                    subject=f"LovelyChaos: {_display_subject(payload.subject)}",
+                    message=summary_result.rendered_message,
+                )
             return InboundResponse(
                 status=WebhookStatus.INGESTION_ACCEPTED.value,
                 message="Relevant school updates were summarized for follow-up.",
@@ -2680,58 +4613,47 @@ def inbound_email(
         db.commit()
         return _safe_error(WebhookStatus.REJECTED_VALIDATION, request_id, "Could not validate event details.")
 
-    household = db.scalar(select(Household).where(Household.id == user.household_id))
-    assert household is not None
     mutation_executed = False
-    has_relevant_event = False
-    outcome_counts = {"create_event": 0, "pending_event": 0, "informational_item": 0}
+    outcome_counts = {"event_created": 0, "followup_available": 0, "info_stored": 0}
     per_event_outcomes: list[dict] = []
-    any_valid = False
     summary_result = None
     summary_audit = None
+    evaluation_datetime_utc = _serialize_dt(datetime.now(timezone.utc)) or ""
+    with _conversation_runtime_scope(
+        source=source,
+        thread_documents=thread_documents,
+        household_context=agent_household_context,
+    ):
+        routing_decisions = _route_extracted_events(
+            extracted_events=extracted_events,
+            children=children,
+            priority_preferences=priority_preferences,
+            sender_email_hint=sender_email_hint,
+            sender_name_hint=sender_name_hint,
+            timezone_hint=user.timezone,
+            evaluation_datetime_utc=evaluation_datetime_utc,
+            document_understanding=document_understanding,
+        )
+    any_valid = any(bool(item.get("validation", {}).get("valid")) for item in routing_decisions)
+    has_relevant_event = any(
+        _relevancy_payload_is_relevant(dict(item.get("relevancy_evidence") or {}))
+        for item in routing_decisions
+    )
 
     for idx, candidate in enumerate(extracted_events, start=1):
-        validation = validate_candidate(candidate)
-        is_actionable = validation["valid"]
-        any_valid = any_valid or is_actionable
-
-        event_text = " ".join(
-            [
-                candidate.title or "",
-                " ".join(candidate.mentioned_names or []),
-                " ".join(candidate.mentioned_schools or []),
-                " ".join(candidate.target_grades or []),
-                candidate.model_reason or "",
-            ]
-        )
-        relevancy = compute_relevancy_evidence(
-            event_text=event_text,
-            target_grades=list(candidate.target_grades or []),
-            model_preference_match=bool(candidate.preference_match),
-            children=children,
-            preference_text=preference_text,
-        )
-        is_relevant = relevancy.is_relevant
-        has_relevant_event = has_relevant_event or is_relevant
+        route_decision = routing_decisions[idx - 1]
+        validation = dict(route_decision.get("validation") or {})
+        relevancy_payload = dict(route_decision.get("relevancy_evidence") or {})
+        suppressed_match = bool(route_decision.get("suppressed_match"))
+        auto_add_decision = dict(route_decision.get("auto_add_decision") or {})
+        execution_disposition = str(route_decision.get("execution_disposition") or "").strip()
+        final_reason = str(route_decision.get("final_reason") or "not_relevant").strip()
+        is_relevant = _relevancy_payload_is_relevant(relevancy_payload)
         target_scope = (candidate.target_scope or "unknown").strip()
         is_school_global = target_scope == "school_global"
-        auto_add_decision = evaluate_auto_add_candidate(candidate, relevancy, children)
-
-        if is_relevant and is_actionable and auto_add_decision.allow:
-            execution_disposition = "create_event"
-            final_reason = "relevant_and_actionable_auto_add"
-        elif is_relevant:
-            execution_disposition = "pending_event"
-            final_reason = "relevant_but_not_actionable" if not is_actionable else "relevant_but_needs_confirmation"
-        elif is_school_global:
-            execution_disposition = "informational_item"
-            final_reason = "not_relevant_school_global"
-        else:
-            execution_disposition = ""
-            final_reason = "not_relevant"
 
         idempotency_key = None
-        if execution_disposition:
+        if execution_disposition in {"create_event", "informational_item"}:
             idempotency_key = (
                 f"{payload.provider_message_id}:route:{idx}:{candidate.title}:{candidate.start_at}:"
                 f"{candidate.end_at}:{execution_disposition}"
@@ -2753,97 +4675,72 @@ def inbound_email(
                     "start_at": _serialize_dt(candidate.start_at),
                     "end_at": _serialize_dt(candidate.end_at),
                     "validation": validation,
-                "relevancy_evidence": relevancy.as_dict(),
-                    "auto_add_decision": {"allow": auto_add_decision.allow, "reason": auto_add_decision.reason},
+                    "relevancy_evidence": relevancy_payload,
+                    "suppressed_match": suppressed_match,
+                    "auto_add_decision": auto_add_decision,
                     "execution_disposition": execution_disposition or None,
                     "final_reason": final_reason,
                     "action": {"idempotent_skip": True},
                 }
             )
-            if execution_disposition:
-                outcome_counts[execution_disposition] += 1
+            if execution_disposition == "create_event":
+                outcome_counts["event_created"] += 1
+            elif execution_disposition == "informational_item":
+                outcome_counts["info_stored"] += 1
+            elif execution_disposition == "followup_available":
+                outcome_counts["followup_available"] += 1
             continue
 
         action: dict = {}
         if execution_disposition == "create_event":
-            if household.auto_add_batch_a_enabled and candidate.start_at and candidate.end_at:
-                gate_response = _tenant_gate_for_calendar_mutation(
-                    db,
-                    request_id,
-                    user.household_id,
-                    user.household_id,
-                )
-                if gate_response:
-                    return gate_response
+            gate_response = _tenant_gate_for_calendar_mutation(
+                db,
+                request_id,
+                user.household_id,
+                user.household_id,
+            )
+            if gate_response:
+                return gate_response
 
-                credential, binding = _resolve_calendar_context_with_refresh(db, user.household_id)
-                try:
-                    calendar_result = calendar_provider.create_event(
-                        access_token=credential.access_token,
-                        calendar_id=binding.calendar_id,
+            credential, binding = _resolve_calendar_context_with_refresh(db, user.household_id)
+            try:
+                all_day = _is_all_day_window(candidate.start_at, candidate.end_at, user.timezone)
+                calendar_result = calendar_provider.create_event(
+                    access_token=credential.access_token,
+                    calendar_id=binding.calendar_id,
+                    title=candidate.title,
+                    start_at=candidate.start_at,
+                    end_at=candidate.end_at,
+                    timezone=user.timezone,
+                    all_day=all_day,
+                )
+                db.add(
+                    Event(
+                        household_id=user.household_id,
+                        source_message_id=source.id,
                         title=candidate.title,
                         start_at=candidate.start_at,
                         end_at=candidate.end_at,
                         timezone=user.timezone,
-                    )
-                    db.add(
-                        Event(
-                            household_id=user.household_id,
-                            source_message_id=source.id,
-                            title=candidate.title,
-                            start_at=candidate.start_at,
-                            end_at=candidate.end_at,
-                            timezone=user.timezone,
-                            status="calendar_synced",
-                            calendar_event_id=calendar_result.calendar_event_id,
-                        )
-                    )
-                    mutation_executed = True
-                    action = {"event": "created", "calendar_synced": True}
-                    dispatch_household_notification(
-                        db=db,
-                        provider=notification_provider,
-                        household_id=user.household_id,
-                        template="event_created",
-                        subject="LovelyChaos event added",
-                        message=f"Event '{candidate.title}' was added to calendar.",
-                    )
-                except CalendarMutationError:
-                    pending_start = candidate.start_at or (datetime.now(timezone.utc) + timedelta(days=1))
-                    db.add(
-                        PendingEvent(
-                            household_id=user.household_id,
-                            event_start=pending_start,
-                            expires_at=datetime.now(timezone.utc) + timedelta(days=7),
-                            title=candidate.title,
-                        )
-                    )
-                    mutation_executed = True
-                    action = {"pending": "created", "calendar_sync": "failed"}
-            else:
-                pending_start = candidate.start_at or (datetime.now(timezone.utc) + timedelta(days=1))
-                db.add(
-                    PendingEvent(
-                        household_id=user.household_id,
-                        event_start=pending_start,
-                        expires_at=datetime.now(timezone.utc) + timedelta(days=7),
-                        title=candidate.title,
+                        all_day=all_day,
+                        status="calendar_synced",
+                        calendar_event_id=calendar_result.calendar_event_id,
                     )
                 )
                 mutation_executed = True
-                action = {"pending": "created", "reason": "auto_add_disabled"}
-        elif execution_disposition == "pending_event":
-            pending_start = candidate.start_at or (datetime.now(timezone.utc) + timedelta(days=1))
-            db.add(
-                PendingEvent(
+                action = {"event": "created", "calendar_synced": True}
+                dispatch_household_notification(
+                    db=db,
+                    provider=notification_provider,
                     household_id=user.household_id,
-                    event_start=pending_start,
-                    expires_at=datetime.now(timezone.utc) + timedelta(days=7),
-                    title=candidate.title,
+                    template="event_created",
+                    subject="LovelyChaos event added",
+                    message=f"Event '{candidate.title}' was added to calendar.",
+                    channel=resolve_response_channel(origin_channel="email"),
                 )
-            )
-            mutation_executed = True
-            action = {"pending": "created"}
+            except CalendarMutationError:
+                action = {"event": "not_created", "calendar_sync": "failed"}
+                final_reason = "calendar_write_failed_followup_available"
         elif execution_disposition == "informational_item":
             db.add(
                 InformationalItem(
@@ -2856,8 +4753,10 @@ def inbound_email(
                 )
             )
             action = {"informational": "stored"}
+        elif execution_disposition == "followup_available":
+            action = {"followup_available": True}
         else:
-            action = {"ignored": True}
+            action = {"followup_available": bool(is_relevant), "ignored": not is_relevant}
 
         if idempotency_key:
             db.add(
@@ -2870,48 +4769,81 @@ def inbound_email(
                     result_hash=_hash_result(execution_disposition),
                 )
             )
-        if execution_disposition:
-            outcome_counts[execution_disposition] += 1
+        if action.get("event") == "created":
+            outcome_counts["event_created"] += 1
+        elif action.get("informational") == "stored":
+            outcome_counts["info_stored"] += 1
+        elif execution_disposition == "followup_available":
+            outcome_counts["followup_available"] += 1
         per_event_outcomes.append(
             {
                 "index": idx,
-                "title": candidate.title,
-                "start_at": _serialize_dt(candidate.start_at),
-                "end_at": _serialize_dt(candidate.end_at),
-                "validation": validation,
-                "relevancy_evidence": relevancy.as_dict(),
-                "auto_add_decision": {"allow": auto_add_decision.allow, "reason": auto_add_decision.reason},
-                "execution_disposition": execution_disposition or None,
-                "final_reason": final_reason,
-                "model_reason": candidate.model_reason,
-                "action": action,
-            }
+                    "title": candidate.title,
+                    "start_at": _serialize_dt(candidate.start_at),
+                    "end_at": _serialize_dt(candidate.end_at),
+                    "validation": validation,
+                    "relevancy_evidence": relevancy_payload,
+                    "suppressed_match": suppressed_match,
+                    "auto_add_decision": auto_add_decision,
+                    "execution_disposition": execution_disposition or None,
+                    "final_reason": final_reason,
+                    "model_reason": candidate.model_reason,
+                    "action": action,
+                }
         )
 
-    summary_result, summary_audit = build_brief_summary(
-        engine=engine_llm,
-        subject=payload.subject,
-        timezone_name=user.timezone,
-        household_preferences=preference_text,
-        system_defaults={item["key"]: bool(item["enabled"]) for item in priority_preferences["system_defaults"]},
-        user_priority_topics=list(priority_preferences["user_priority_topics"]),
-        children=children,
-        extracted_events=extracted_events,
-        per_event_outcomes=per_event_outcomes,
-        sections=sections,
-        analysis_text=analysis_text,
-        chunk_notes=chunk_notes,
-    )
+    with _conversation_runtime_scope(
+        source=source,
+        thread_documents=thread_documents,
+        household_context=agent_household_context,
+    ):
+        summary_result, summary_audit = build_brief_summary(
+            engine=engine_llm,
+            subject=payload.subject,
+            timezone_name=user.timezone,
+            household_preferences=preference_text,
+            system_defaults={item["key"]: bool(item["enabled"]) for item in priority_preferences["system_defaults"]},
+            user_priority_topics=list(priority_preferences["user_priority_topics"]),
+            suppressed_priority_topics=list(priority_preferences["effective_suppressed_priority_topics"]),
+            children=children,
+            extracted_events=extracted_events,
+            per_event_outcomes=per_event_outcomes,
+            sections=sections,
+            analysis_text=analysis_text,
+            chunk_notes=chunk_notes,
+            informational_only=outcome_counts["followup_available"] == 0 and outcome_counts["event_created"] == 0,
+            reference_datetime_hint=reference_datetime_hint,
+            document_understanding=document_understanding,
+        )
     response_channel = resolve_response_channel(
         origin_channel="email",
         email_intent_mode=email_intent.mode,
         admin_phone=user.phone,
     )
+    actionable_items = _followup_actionable_items_from_extracted_events(
+        extracted_events=extracted_events,
+        source_message_id=source.id,
+        timezone_name=user.timezone,
+    )
+    actionable_items.extend(
+        _document_topics_to_followup_items(
+            document_understanding,
+            source_message_id=source.id,
+        )
+    )
+    summary_items_shown = _followup_summary_items(summary_result, actionable_items)
     model_output = {
         "llm": engine_llm.metadata(),
         "email_intent": _email_intent_metadata(email_intent),
         "forwarded_preface_intent": forwarded_preface_intent,
+        "conversation": {
+            "session_id": _source_session_id(source),
+            "thread_key": source.thread_key,
+            "thread_document_count": len(thread_documents),
+        },
         "events": [{"title": e.title, "confidence": e.confidence} for e in extracted_events],
+        "document_understanding": document_understanding,
+        "routing": routing_decisions,
         "email_level_notes": "\n".join(chunk_notes) if chunk_notes else None,
         "analysis": analysis_audit,
         "summary": summary_audit,
@@ -2919,36 +4851,27 @@ def inbound_email(
 
     if not any_valid and has_relevant_event:
         _mark_receipt_processed(receipt)
-        _send_user_response(
-            db=db,
-            user=user,
-            channel=response_channel,
-            template="email_analysis_recap",
-            subject=f"LovelyChaos: {_display_subject(payload.subject)}",
-            message=summary_result.rendered_message,
-        )
         persist_followup_context(
             db,
             household_id=user.household_id,
             source_message_id=source.id,
             origin_channel="email",
             response_channel=response_channel,
-            thread_or_conversation_key=payload.provider_message_id,
+            thread_or_conversation_key=_followup_context_key(source),
             summary_title=summary_result.title,
-            summary_items_shown=[
-                *[item.as_dict() for item in summary_result.important_dates],
-                *[item.as_dict() for item in summary_result.important_items],
-                *[item.as_dict() for item in summary_result.other_topics],
-            ],
-            all_extracted_items=_followup_items_from_extracted_events(extracted_events),
-            section_snippets=[
-                {
-                    "label": item.get("label"),
-                    "text": item.get("text"),
-                }
-                for item in list(summary_audit.get("prefilter", {}).get("kept_sections") or [])
-                if item.get("text")
-            ],
+            summary_items_shown=summary_items_shown,
+            actionable_items=actionable_items,
+            section_snippets=(
+                [
+                    {
+                        "label": item.get("label"),
+                        "text": item.get("text"),
+                    }
+                    for item in list(summary_audit.get("prefilter", {}).get("kept_sections") or [])
+                    if item.get("text")
+                ]
+                + _document_understanding_section_snippets(document_understanding)
+            ),
         )
         _audit(
             db,
@@ -2961,7 +4884,19 @@ def inbound_email(
             {"status": "processed", "counts": outcome_counts},
             {"event_outcomes": per_event_outcomes},
         )
-        db.commit()
+        with _conversation_runtime_scope(
+            source=source,
+            thread_documents=thread_documents,
+            household_context=agent_household_context,
+        ):
+            _commit_then_send_user_response(
+                db=db,
+                user=user,
+                channel=response_channel,
+                template="email_analysis_recap",
+                subject=f"LovelyChaos: {_display_subject(payload.subject)}",
+                message=summary_result.rendered_message,
+            )
         return InboundResponse(
             status=WebhookStatus.INGESTION_ACCEPTED.value,
             message="Relevant school updates were summarized for follow-up.",
@@ -2983,44 +4918,47 @@ def inbound_email(
     )
 
     _mark_receipt_processed(receipt)
-    _send_user_response(
-        db=db,
-        user=user,
-        channel=response_channel,
-        template="email_analysis_recap",
-        subject=f"LovelyChaos: {_display_subject(payload.subject)}",
-        message=summary_result.rendered_message,
-    )
     persist_followup_context(
         db,
         household_id=user.household_id,
         source_message_id=source.id,
         origin_channel="email",
         response_channel=response_channel,
-        thread_or_conversation_key=payload.provider_message_id,
+        thread_or_conversation_key=_followup_context_key(source),
         summary_title=summary_result.title,
-        summary_items_shown=[
-            *[item.as_dict() for item in summary_result.important_dates],
-            *[item.as_dict() for item in summary_result.important_items],
-            *[item.as_dict() for item in summary_result.other_topics],
-        ],
-        all_extracted_items=_followup_items_from_extracted_events(extracted_events),
-        section_snippets=[
-            {
-                "label": item.get("label"),
-                "text": item.get("text"),
-            }
-            for item in list(summary_audit.get("prefilter", {}).get("kept_sections") or [])
-            if item.get("text")
-        ],
+        summary_items_shown=summary_items_shown,
+        actionable_items=actionable_items,
+        section_snippets=(
+            [
+                {
+                    "label": item.get("label"),
+                    "text": item.get("text"),
+                }
+                for item in list(summary_audit.get("prefilter", {}).get("kept_sections") or [])
+                if item.get("text")
+            ]
+            + _document_understanding_section_snippets(document_understanding)
+        ),
     )
-    db.commit()
+    with _conversation_runtime_scope(
+        source=source,
+        thread_documents=thread_documents,
+        household_context=agent_household_context,
+    ):
+        _commit_then_send_user_response(
+            db=db,
+            user=user,
+            channel=response_channel,
+            template="email_analysis_recap",
+            subject=f"LovelyChaos: {_display_subject(payload.subject)}",
+            message=summary_result.rendered_message,
+        )
     return InboundResponse(
         status=WebhookStatus.INGESTION_ACCEPTED.value,
         message=(
             f"Processed {len(extracted_events)} item(s): "
-            f"{outcome_counts['create_event']} calendar updates, "
-            f"{outcome_counts['informational_item']} summarized topics."
+            f"{outcome_counts['event_created']} calendar updates, "
+            f"{outcome_counts['info_stored']} stored informational topics."
         ),
         request_id=request_id,
         mutation_executed=mutation_executed,
@@ -3150,6 +5088,61 @@ def _retrieve_resend_received_email(email_id: str) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _retrieve_resend_received_attachments(email_id: str) -> list[dict]:
+    if not email_id or not settings.resend_api_key:
+        return []
+    try:
+        with httpx.Client(timeout=10) as client:
+            response = client.get(
+                f"https://api.resend.com/emails/receiving/{email_id}/attachments",
+                headers={
+                    "Authorization": f"Bearer {settings.resend_api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def _download_resend_pdf_attachments(email_id: str) -> list[DownloadedAttachment]:
+    attachments: list[DownloadedAttachment] = []
+    for item in _retrieve_resend_received_attachments(email_id):
+        filename = str(item.get("filename") or item.get("name") or "attachment.pdf").strip() or "attachment.pdf"
+        content_type = str(item.get("content_type") or item.get("contentType") or "").strip().lower()
+        download_url = str(item.get("download_url") or item.get("downloadUrl") or item.get("url") or "").strip()
+        if "pdf" not in content_type and not filename.lower().endswith(".pdf"):
+            continue
+        if not download_url:
+            continue
+        try:
+            with httpx.Client(timeout=20, follow_redirects=True) as client:
+                response = client.get(download_url)
+            response.raise_for_status()
+        except Exception:
+            continue
+        attachment_content_type = (response.headers.get("content-type") or content_type or "application/pdf").split(";")[0].strip().lower()
+        attachments.append(
+            DownloadedAttachment(
+                filename=filename,
+                content_type=attachment_content_type,
+                content=response.content,
+                source_url=download_url,
+                status_reason="downloaded_via_resend_attachments_api",
+                extracted_text=maybe_extract_pdf_text(response.content),
+            )
+        )
+    return attachments
+
+
 def _build_inbound_email_from_resend(payload: dict, svix_id: Optional[str] = None) -> InboundEmailRequest:
     data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
     if not isinstance(data, dict):
@@ -3169,24 +5162,39 @@ def _build_inbound_email_from_resend(payload: dict, svix_id: Optional[str] = Non
         or svix_id
         or ""
     )
+    email_id = str(data.get("email_id") or data.get("emailId") or "")
+    fetched = _retrieve_resend_received_email(email_id) if email_id else {}
+    effective = fetched if isinstance(fetched, dict) and fetched else data
     sender = _extract_email_address(str(data.get("from") or data.get("from_email") or ""))
     recipient_alias = _extract_email_address(
         _first_recipient(
-            data.get("to")
-            or data.get("to_email")
-            or data.get("recipients")
-            or data.get("delivered_to")
+            effective.get("to")
+            or effective.get("to_email")
+            or effective.get("recipients")
+            or effective.get("delivered_to")
             or payload.get("to")
             or payload.get("recipient")
         )
     )
-    subject = str(data.get("subject") or "")
-    body_text = _extract_best_body_text(data, payload)
-    if not body_text:
-        email_id = str(data.get("email_id") or "")
-        fetched = _retrieve_resend_received_email(email_id)
-        if fetched:
-            body_text = _extract_best_body_text(fetched, {"data": fetched})
+    subject = str(effective.get("subject") or data.get("subject") or "")
+    body_text = _extract_best_body_text(effective, payload)
+    headers = effective.get("headers") if isinstance(effective.get("headers"), (dict, list)) else data.get("headers")
+    internet_message_id = str(
+        effective.get("message_id")
+        or effective.get("messageId")
+        or extract_header_value(headers, "Message-ID")
+        or provider_message_id
+    ).strip()
+    in_reply_to_message_id = str(
+        effective.get("in_reply_to")
+        or effective.get("inReplyTo")
+        or extract_header_value(headers, "In-Reply-To")
+    ).strip()
+    references_header = str(
+        effective.get("references")
+        or effective.get("references_header")
+        or extract_header_value(headers, "References")
+    ).strip()
 
     # Some Resend inbound events omit explicit recipient in payload; this alias is deterministic for this deployment.
     if not recipient_alias:
@@ -3203,6 +5211,10 @@ def _build_inbound_email_from_resend(payload: dict, svix_id: Optional[str] = Non
         recipient_alias=recipient_alias,
         subject=subject,
         body_text=body_text,
+        email_id=email_id,
+        internet_message_id=internet_message_id,
+        in_reply_to_message_id=in_reply_to_message_id,
+        references_header=references_header,
     )
 
 
@@ -3243,7 +5255,11 @@ async def inbound_resend_webhook(request: Request, db: Session = Depends(get_db)
                 processing_state=ProcessingState.COMPLETED.value,
             )
         raise HTTPException(status_code=400, detail="Invalid Resend payload") from exc
-    return inbound_email(payload=inbound, x_signature=settings.webhook_secret, db=db)
+    def _run_sync_inbound() -> InboundResponse:
+        with Session(bind=engine) as thread_db:
+            return inbound_email(payload=inbound, x_signature=settings.webhook_secret, db=thread_db)
+
+    return await run_in_threadpool(_run_sync_inbound)
 
 
 @app.post("/webhooks/sms/inbound", response_model=InboundResponse)
@@ -3279,12 +5295,6 @@ def inbound_sms(
     )
     db.add(receipt)
 
-    # Spouse replies are receive-only and may not mutate state.
-    spouse_household = db.scalar(select(Household).where(Household.spouse_phone == payload.sender_phone))
-    if spouse_household:
-        db.commit()
-        return _safe_error(WebhookStatus.REJECTED_UNAUTHORIZED, request_id, "Only the admin can run SMS commands.")
-
     attribution = resolve_admin_phone(db, payload.sender_phone)
     if attribution.kind == "unverified":
         db.commit()
@@ -3311,201 +5321,293 @@ def inbound_sms(
         household_id=user.household_id,
         subject="",
         body_text=payload.body_text,
+        thread_key=sms_session_id(household_id=user.household_id),
     )
     db.add(source)
     db.flush()
-
-    try:
-        command = engine_llm.parse_command(payload.body_text)
-    except Exception:
-        db.commit()
-        return _command_reply(
-            db=db,
-            user=user,
-            channel="sms",
-            template="command_clarification",
-            subject="LovelyChaos SMS",
-            status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-            message="Unable to parse SMS command.",
-            request_id=request_id,
-            mutation_executed=False,
-        )
-    if command["action"] not in {"delete", "add", "more_info", "remind", "set_preference"}:
-        db.commit()
-        return _command_reply(
-            db=db,
-            user=user,
-            channel="sms",
-            template="command_clarification",
-            subject="LovelyChaos SMS",
-            status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-            message="Unsupported SMS command.",
-            request_id=request_id,
-            mutation_executed=False,
-        )
-
-    strategy = _command_execution_strategy(command)
-    if not _command_strategy_matches_action(command["action"], strategy):
-        db.commit()
-        return _command_reply(
-            db=db,
-            user=user,
-            channel="sms",
-            template="command_clarification",
-            subject="LovelyChaos SMS",
-            status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-            message="I understood the request, but this command needs a different follow-up flow.",
-            request_id=request_id,
-            mutation_executed=False,
-        )
-
-    if strategy == "semantic" and command["action"] == "more_info":
-        context = load_active_followup_context(db, household_id=user.household_id, response_channel="sms")
-        _mark_receipt_processed(receipt)
-        db.commit()
-        more_info = _handle_more_info_command(
-            request_id=request_id,
-            topic=command.get("topic"),
-            context=context,
-        )
-        return _command_reply(
-            db=db,
-            user=user,
-            channel="sms",
-            template="more_info",
-            subject="LovelyChaos SMS",
-            status=WebhookStatus(more_info.status),
-            message=more_info.message,
-            request_id=request_id,
-            mutation_executed=False,
-        )
-
-    if strategy == "deterministic" and command["action"] == "set_preference":
-        return _handle_set_preference_command(
-            db=db,
-            request_id=request_id,
-            user=user,
-            receipt=receipt,
-            response_channel="sms",
-            response_subject="LovelyChaos SMS",
-            topic=command.get("topic"),
-            preference_behavior=command.get("preference_behavior"),
-        )
-
-    if strategy == "deterministic" and command["action"] == "delete":
-        event_id = command["pending_id"]
-        if event_id is None:
-            _mark_receipt_processed(receipt)
-            db.commit()
-            return _command_reply(
-                db=db,
-                user=user,
-                channel="sms",
-                template="delete_clarification",
-                subject="LovelyChaos SMS",
-                status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-                message="Please include event id to delete.",
-                request_id=request_id,
-                mutation_executed=False,
-            )
-        event = db.scalar(select(Event).where(Event.id == event_id))
-        if not event:
-            _mark_receipt_processed(receipt)
-            db.commit()
-            return _command_reply(
-                db=db,
-                user=user,
-                channel="sms",
-                template="delete_clarification",
-                subject="LovelyChaos SMS",
-                status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-                message="Event not found.",
-                request_id=request_id,
-                mutation_executed=False,
-            )
-        gate = _tenant_gate_for_calendar_mutation(db, request_id, user.household_id, event.household_id)
-        if gate:
-            return gate
-        if not event.calendar_event_id:
-            _mark_receipt_processed(receipt)
-            db.commit()
-            return _command_reply(
-                db=db,
-                user=user,
-                channel="sms",
-                template="delete_clarification",
-                subject="LovelyChaos SMS",
-                status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-                message="Event is not linked to Google Calendar.",
-                request_id=request_id,
-                mutation_executed=False,
-            )
-        credential, binding = _resolve_calendar_context_with_refresh(db, user.household_id)
-        try:
-            calendar_provider.delete_event(
-                access_token=credential.access_token,
-                calendar_id=binding.calendar_id,
-                calendar_event_id=event.calendar_event_id,
-            )
-        except CalendarMutationError:
-            _mark_receipt_processed(receipt)
-            db.commit()
-            return _command_reply(
-                db=db,
-                user=user,
-                channel="sms",
-                template="delete_clarification",
-                subject="LovelyChaos SMS",
-                status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
-                message="Unable to delete event from calendar. Please try again.",
-                request_id=request_id,
-                mutation_executed=False,
-            )
-        event.status = "deleted"
-        event.version += 1
-        _mark_receipt_processed(receipt)
-        db.commit()
-        return _command_reply(
-            db=db,
-            user=user,
-            channel="sms",
-            template="event_deleted",
-            subject="LovelyChaos SMS",
-            status=WebhookStatus.COMMAND_COMPLETED,
-            message="Event deleted",
-            request_id=request_id,
-            mutation_executed=True,
-        )
-
-    if strategy == "deterministic" and command["action"] == "remind":
-        return _handle_reminder_command(
-            db=db,
-            request_id=request_id,
-            command=command,
-            user=user,
-            provider_message_id=payload.provider_message_id,
-            receipt=receipt,
-            response_channel="sms",
-            response_subject="LovelyChaos SMS",
-        )
-
-    followup_context = load_active_followup_context(db, household_id=user.household_id, response_channel="sms")
-    return _handle_add_command(
-        db=db,
-        request_id=request_id,
+    active_sms_state = load_active_sms_conversation_state(db, household_id=user.household_id, channel="sms")
+    household = db.scalar(select(Household).where(Household.id == user.household_id))
+    priority_preferences = load_priority_preferences(db, user.household_id)
+    children = db.scalars(select(Child).where(Child.household_id == user.household_id, Child.status == "active")).all()
+    agent_household_context = _build_agent_household_context(
+        db,
         user=user,
-        source=source,
-        receipt=receipt,
-        provider_message_id=payload.provider_message_id,
-        subject="",
-        raw_body_text=payload.body_text,
-        analysis_body_text=payload.body_text,
-        response_channel="sms",
-        response_subject="LovelyChaos SMS",
-        followup_context=followup_context,
-        command_topic=command.get("topic"),
-        command_parse_metadata=command,
+        household=household,
+        children=children,
+        priority_preferences=priority_preferences,
     )
+    db.commit()
+    with _conversation_runtime_scope(
+        source=source,
+        thread_documents=[],
+        household_context=agent_household_context,
+    ):
+        try:
+            command = engine_llm.parse_command(payload.body_text)
+        except Exception:
+            fallback_command = {
+                "action": "none",
+                "topic": None,
+            }
+            contextual_response = _try_contextual_sms_assistant(
+                db=db,
+                request_id=request_id,
+                user=user,
+                source=source,
+                receipt=receipt,
+                provider_message_id=payload.provider_message_id,
+                raw_body_text=payload.body_text,
+                command=fallback_command,
+                active_state=active_sms_state,
+            )
+            if contextual_response is not None:
+                return contextual_response
+            db.commit()
+            return _command_reply(
+                db=db,
+                user=user,
+                channel="sms",
+                template="command_clarification",
+                subject="LovelyChaos SMS",
+                status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+                message="Unable to parse SMS command.",
+                request_id=request_id,
+                mutation_executed=False,
+            )
+        contextual_response = _try_contextual_sms_assistant(
+            db=db,
+            request_id=request_id,
+            user=user,
+            source=source,
+            receipt=receipt,
+            provider_message_id=payload.provider_message_id,
+            raw_body_text=payload.body_text,
+            command=command,
+            active_state=active_sms_state,
+        )
+        if contextual_response is not None:
+            return contextual_response
+        if command["action"] not in {"delete", "add", "more_info", "update", "remind", "set_preference"}:
+            db.commit()
+            return _command_reply(
+                db=db,
+                user=user,
+                channel="sms",
+                template="command_clarification",
+                subject="LovelyChaos SMS",
+                status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+                message="I couldn't match that to a school-update action. Try 'add Mar 19 to calendar', 'tell me more about science club', 'move pizza day to Friday', or reply with the number from my last message.",
+                request_id=request_id,
+                mutation_executed=False,
+            )
+
+        strategy = _command_execution_strategy(command)
+        if not _command_strategy_matches_action(command["action"], strategy):
+            db.commit()
+            return _command_reply(
+                db=db,
+                user=user,
+                channel="sms",
+                template="command_clarification",
+                subject="LovelyChaos SMS",
+                status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+                message="I understood the request, but this command needs a different follow-up flow.",
+                request_id=request_id,
+                mutation_executed=False,
+            )
+
+        if command.get("action") in {"more_info", "update", "delete", "remind", "set_preference", "add"}:
+            tool_response = _run_command_tools(
+                db=db,
+                request_id=request_id,
+                user=user,
+                source=source,
+                receipt=receipt,
+                response_channel="sms",
+                response_subject="LovelyChaos SMS",
+                provider_message_id=payload.provider_message_id,
+                subject="LovelyChaos SMS",
+                raw_message_text=payload.body_text,
+                analysis_message_text=payload.body_text,
+                command=command,
+                allow_add_fallback=command.get("action") == "add",
+            )
+            if tool_response is not None:
+                return tool_response
+
+        if strategy == "semantic" and command["action"] == "more_info":
+            context = load_active_followup_context(
+                db,
+                household_id=user.household_id,
+                response_channel="sms",
+                thread_or_conversation_key=_followup_context_key(source),
+            )
+            _mark_receipt_processed(receipt)
+            db.commit()
+            more_info = _handle_more_info_command(
+                db=db,
+                request_id=request_id,
+                topic=command.get("topic"),
+                context=context,
+            )
+            return _command_reply(
+                db=db,
+                user=user,
+                channel="sms",
+                template="more_info",
+                subject="LovelyChaos SMS",
+                status=WebhookStatus(more_info.status),
+                message=more_info.message,
+                request_id=request_id,
+                mutation_executed=False,
+            )
+
+        if strategy == "deterministic" and command["action"] == "set_preference":
+            return _handle_set_preference_command(
+                db=db,
+                request_id=request_id,
+                user=user,
+                receipt=receipt,
+                response_channel="sms",
+                response_subject="LovelyChaos SMS",
+                topic=command.get("topic"),
+                preference_behavior=command.get("preference_behavior"),
+            )
+
+        if strategy == "deterministic" and command["action"] == "delete":
+            event_id = command["event_id"]
+            if event_id is None:
+                _mark_receipt_processed(receipt)
+                db.commit()
+                return _command_reply(
+                    db=db,
+                    user=user,
+                    channel="sms",
+                    template="delete_clarification",
+                    subject="LovelyChaos SMS",
+                    status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+                    message="Please include event id to delete.",
+                    request_id=request_id,
+                    mutation_executed=False,
+                )
+            event = db.scalar(select(Event).where(Event.id == event_id))
+            if not event:
+                _mark_receipt_processed(receipt)
+                db.commit()
+                return _command_reply(
+                    db=db,
+                    user=user,
+                    channel="sms",
+                    template="delete_clarification",
+                    subject="LovelyChaos SMS",
+                    status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+                    message="Event not found.",
+                    request_id=request_id,
+                    mutation_executed=False,
+                )
+            gate = _tenant_gate_for_calendar_mutation(db, request_id, user.household_id, event.household_id)
+            if gate:
+                return gate
+            if not event.calendar_event_id:
+                _mark_receipt_processed(receipt)
+                db.commit()
+                return _command_reply(
+                    db=db,
+                    user=user,
+                    channel="sms",
+                    template="delete_clarification",
+                    subject="LovelyChaos SMS",
+                    status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+                    message="Event is not linked to Google Calendar.",
+                    request_id=request_id,
+                    mutation_executed=False,
+                )
+            credential, binding = _resolve_calendar_context_with_refresh(db, user.household_id)
+            try:
+                calendar_provider.delete_event(
+                    access_token=credential.access_token,
+                    calendar_id=binding.calendar_id,
+                    calendar_event_id=event.calendar_event_id,
+                )
+            except CalendarMutationError:
+                _mark_receipt_processed(receipt)
+                db.commit()
+                return _command_reply(
+                    db=db,
+                    user=user,
+                    channel="sms",
+                    template="delete_clarification",
+                    subject="LovelyChaos SMS",
+                    status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+                    message="Unable to delete event from calendar. Please try again.",
+                    request_id=request_id,
+                    mutation_executed=False,
+                )
+            event.status = "deleted"
+            event.version += 1
+            _mark_receipt_processed(receipt)
+            db.commit()
+            return _command_reply(
+                db=db,
+                user=user,
+                channel="sms",
+                template="event_deleted",
+                subject="LovelyChaos SMS",
+                status=WebhookStatus.COMMAND_COMPLETED,
+                message="Event deleted",
+                request_id=request_id,
+                mutation_executed=True,
+            )
+
+        if strategy == "deterministic" and command["action"] == "remind":
+            return _handle_reminder_command(
+                db=db,
+                request_id=request_id,
+                command=command,
+                user=user,
+                provider_message_id=payload.provider_message_id,
+                receipt=receipt,
+                response_channel="sms",
+                response_subject="LovelyChaos SMS",
+            )
+
+        if strategy == "deterministic" and command["action"] == "update":
+            _mark_receipt_processed(receipt)
+            db.commit()
+            return _command_reply(
+                db=db,
+                user=user,
+                channel="sms",
+                template="command_clarification",
+                subject="LovelyChaos SMS",
+                status=WebhookStatus.COMMAND_NEEDS_CLARIFICATION,
+                message="I couldn't safely update that event. Please include the event name and the change you want.",
+                request_id=request_id,
+                mutation_executed=False,
+            )
+
+        followup_context = load_active_followup_context(
+            db,
+            household_id=user.household_id,
+            response_channel="sms",
+            thread_or_conversation_key=_followup_context_key(source),
+        )
+        return _handle_add_command(
+            db=db,
+            request_id=request_id,
+            user=user,
+            source=source,
+            receipt=receipt,
+            provider_message_id=payload.provider_message_id,
+            subject="",
+            raw_body_text=payload.body_text,
+            analysis_body_text=payload.body_text,
+            response_channel="sms",
+            response_subject="LovelyChaos SMS",
+            followup_context=followup_context,
+            command_topic=command.get("topic"),
+            command_parse_metadata=command,
+        )
 
 
 @app.post("/webhooks/twilio/sms", response_model=InboundResponse)
@@ -3561,13 +5663,6 @@ def run_operation(
         mutation_executed=op.mutation_executed,
         user_message=op.user_message,
     )
-
-
-@app.post("/internal/jobs/expire")
-def run_expiry(_: None = Depends(_require_admin_key), db: Session = Depends(get_db)):
-    count = expire_pending_events(db)
-    db.commit()
-    return {"expired": count}
 
 
 @app.post("/internal/jobs/retention")
@@ -3712,7 +5807,12 @@ def run_google_token_refresh(
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "process_id": os.getpid(),
+        "booted_at": APP_BOOTED_AT.isoformat(),
+        "llm": engine_llm.metadata(),
+    }
 
 
 @app.get("/")
@@ -3741,10 +5841,10 @@ def readiness(db: Session = Depends(get_db)):
 
 
 @app.get("/auth/google/start")
-def auth_google_start(household_id: int = 1):
+def auth_google_start(household_id: int = 1, next: str | None = None):
     if not settings.google_client_id:
         raise HTTPException(status_code=500, detail="GOOGLE_CLIENT_ID is not configured")
-    state = _build_oauth_state(household_id=household_id)
+    state = _build_oauth_state(household_id=household_id, next_url=next)
     query = urlencode(
         {
             "client_id": settings.google_client_id,
@@ -3841,6 +5941,9 @@ def auth_google_callback(code: str, state: str, db: Session = Depends(get_db)):
     binding.status = "active"
 
     db.commit()
+    next_url = payload.get("next_url")
+    if next_url and next_url.startswith("/"):
+        return RedirectResponse(next_url, status_code=303)
     return {
         "status": "connected",
         "household_id": household_id,
@@ -3858,15 +5961,11 @@ def admin_get_profile(db: Session = Depends(get_db)):
     assert household is not None
     assert admins
     admin = admins[0]
-    secondary_admin = admins[1] if len(admins) > 1 else None
     return HouseholdProfileOut(
         household_id=household.id,
         admin_email=admin.email,
-        secondary_admin_email=secondary_admin.email if secondary_admin else "",
         admin_phone=admin.phone or "",
         timezone=household.timezone,
-        spouse_phone=household.spouse_phone or "",
-        spouse_notifications_enabled=household.spouse_notifications_enabled,
     )
 
 
@@ -3879,29 +5978,16 @@ def admin_put_profile(payload: HouseholdProfileIn, db: Session = Depends(get_db)
     assert household is not None
     assert admins
     admin = admins[0]
-    secondary_admin = admins[1] if len(admins) > 1 else None
-
-    primary_email = payload.admin_email.strip().lower()
-    secondary_email = payload.secondary_admin_email.strip().lower()
-    if secondary_email and secondary_email == primary_email:
-        raise HTTPException(status_code=409, detail="Secondary admin email must be different from primary admin email")
 
     admin.email = payload.admin_email.strip().lower()
     admin.phone = payload.admin_phone.strip() or None
 
-    if secondary_email:
-        if secondary_admin is None:
-            secondary_admin = User(household_id=1, is_admin=True, verified=True)
-            db.add(secondary_admin)
-        secondary_admin.email = secondary_email
-        secondary_admin.phone = secondary_admin.phone or None
-        secondary_admin.verified = True
-    elif secondary_admin is not None:
-        db.delete(secondary_admin)
+    for extra_admin in admins[1:]:
+        db.delete(extra_admin)
 
     _set_household_timezone(db, household.id, payload.timezone.strip() or household.timezone or "UTC")
-    household.spouse_phone = payload.spouse_phone.strip() or None
-    household.spouse_notifications_enabled = payload.spouse_notifications_enabled
+    household.spouse_phone = None
+    household.spouse_notifications_enabled = False
     db.commit()
     return {"ok": True}
 
@@ -3928,8 +6014,19 @@ def admin_put_settings(payload: SettingsIn, db: Session = Depends(get_db)):
 
 @app.get("/admin/children")
 def admin_get_children(db: Session = Depends(get_db)):
-    children = db.scalars(select(Child).where(Child.household_id == 1)).all()
-    return [{"id": c.id, "name": c.name, "school_name": c.school_name, "grade": c.grade} for c in children]
+    children = db.scalars(
+        select(Child).where(Child.household_id == 1, Child.status == "active").order_by(Child.id)
+    ).all()
+    return [
+        {
+            "id": c.id,
+            "name": c.name,
+            "school_name": c.school_name,
+            "grade": c.grade,
+            "teacher_contacts": _serialize_teacher_contacts(c),
+        }
+        for c in children
+    ]
 
 
 @app.get("/admin/schools/search")
@@ -3956,9 +6053,17 @@ def admin_create_child(payload: ChildIn, db: Session = Depends(get_db)):
     )
     child = Child(household_id=1, name=payload.name, school_name=stored_school_name, grade=payload.grade)
     db.add(child)
+    db.flush()
+    _replace_teacher_contacts(child, [contact.model_dump() for contact in payload.teacher_contacts])
     db.commit()
     db.refresh(child)
-    response = {"id": child.id, "name": child.name, "school_name": child.school_name, "grade": child.grade}
+    response = {
+        "id": child.id,
+        "name": child.name,
+        "school_name": child.school_name,
+        "grade": child.grade,
+        "teacher_contacts": _serialize_teacher_contacts(child),
+    }
     if resolution:
         response.update(
             {
@@ -3970,19 +6075,127 @@ def admin_create_child(payload: ChildIn, db: Session = Depends(get_db)):
     return response
 
 
+@app.delete("/admin/children/{child_id}")
+def admin_delete_child(child_id: int, db: Session = Depends(get_db)):
+    child = db.scalar(select(Child).where(Child.id == child_id, Child.household_id == 1))
+    if not child:
+        raise HTTPException(status_code=404, detail="Child not found")
+    child.status = "inactive"
+    db.commit()
+    return {"ok": True}
+
+
 @app.get("/admin/preferences")
 def admin_get_preferences(db: Session = Depends(get_db)):
     return load_priority_preferences(db, 1)
 
 
+def _parse_topic_lines(raw_value: str) -> list[str]:
+    return [
+        line.strip()
+        for line in str(raw_value or "").splitlines()
+        if line and line.strip()
+    ]
+
+
+def _parse_preference_notes(raw_text: str, db: Session | None = None) -> dict:
+    preset_topics = [item["label"] for item in priority_topic_catalog()]
+    try:
+        owns_db = db is None
+        session = db or Session(bind=engine)
+        try:
+            user = session.scalar(select(User).where(User.household_id == 1, User.is_admin.is_(True)).order_by(User.id.asc()))
+            if user is None:
+                user = session.scalar(select(User).where(User.household_id == 1).order_by(User.id.asc()))
+            if user is not None:
+                household = session.scalar(select(Household).where(Household.id == user.household_id))
+                children = session.scalars(
+                    select(Child).where(Child.household_id == user.household_id, Child.status == "active")
+                ).all()
+                household_context = _build_agent_household_context(
+                    session,
+                    user=user,
+                    household=household,
+                    children=children,
+                )
+            else:
+                household_context = {
+                    "timezone": "UTC",
+                    "household": {"household_id": 1},
+                    "preferences": {"raw_text": raw_text},
+                }
+            with engine_llm.conversation_scope(
+                workflow_name="LovelyChaos admin preferences",
+                household_context=household_context,
+                use_session=False,
+            ):
+                parsed = engine_llm.parse_preference_notes(
+                    raw_text=raw_text,
+                    preset_topics=preset_topics,
+                )
+        finally:
+            if owns_db:
+                session.close()
+        return {
+            "positive_topics": list(parsed.get("positive_topics") or []),
+            "negative_topics": list(parsed.get("negative_topics") or []),
+            "status": "success",
+            "error": "",
+        }
+    except Exception:
+        import traceback
+
+        detail = traceback.format_exc(limit=1).strip().splitlines()[-1]
+        try:
+            fallback = MockDecisionEngine().parse_preference_notes(
+                raw_text=raw_text,
+                preset_topics=preset_topics,
+            )
+            return {
+                "positive_topics": list(fallback.get("positive_topics") or []),
+                "negative_topics": list(fallback.get("negative_topics") or []),
+                "status": "success",
+                "error": "",
+            }
+        except Exception:
+            fallback_detail = traceback.format_exc(limit=1).strip().splitlines()[-1]
+        return {
+            "positive_topics": [],
+            "negative_topics": [],
+            "status": "error",
+            "error": f"{detail[:120]} | fallback={fallback_detail[:70]}",
+        }
+
+
 @app.put("/admin/preferences")
 def admin_put_preferences(payload: PreferenceIn, db: Session = Depends(get_db)):
+    parsed_preferences = _parse_preference_notes(payload.raw_text)
+    structured_json = dict(payload.structured_json or {})
     profile = save_priority_preferences(
         db,
         1,
         raw_text=payload.raw_text,
         system_defaults=payload.system_defaults,
         user_priority_topics=payload.user_priority_topics,
+        parsed_priority_topics=list(parsed_preferences.get("positive_topics") or []),
+        parsed_suppressed_topics=list(parsed_preferences.get("negative_topics") or []),
+        admin_priority_topics=(
+            list(structured_json.get("admin_priority_topics") or [])
+            if "admin_priority_topics" in structured_json
+            else None
+        ),
+        admin_suppressed_topics=(
+            list(structured_json.get("admin_suppressed_priority_topics") or [])
+            if "admin_suppressed_priority_topics" in structured_json
+            else None
+        ),
+        admin_override_active=(
+            bool(structured_json.get("admin_override_active"))
+            if "admin_override_active" in structured_json
+            else None
+        ),
+        parse_status=str(parsed_preferences.get("status") or "success"),
+        parse_error=str(parsed_preferences.get("error") or ""),
     )
     db.commit()
     return {"ok": True, "version": profile.version}
@@ -4028,11 +6241,6 @@ def admin_put_calendar_binding(payload: CalendarBindingIn, db: Session = Depends
     binding.status = "active"
     db.commit()
     return {"ok": True}
-
-
-@app.get("/admin/pending-events")
-def admin_get_pending(db: Session = Depends(get_db)):
-    raise HTTPException(status_code=410, detail="Pending review is no longer part of the admin experience")
 
 
 @app.get("/admin/reminders", response_model=list[ReminderOut])
@@ -4205,22 +6413,6 @@ def admin_get_inbound_activity(limit: int = 25, db: Session = Depends(get_db)):
     }
 
 
-@app.post("/admin/pending-events/{pending_id}/confirm")
-def admin_confirm_pending(
-    pending_id: int,
-    db: Session = Depends(get_db),
-):
-    raise HTTPException(status_code=410, detail="Pending review is no longer part of the admin experience")
-
-
-@app.post("/admin/pending-events/{pending_id}/reject")
-def admin_reject_pending(
-    pending_id: int,
-    db: Session = Depends(get_db),
-):
-    raise HTTPException(status_code=410, detail="Pending review is no longer part of the admin experience")
-
-
 @app.get("/admin", response_class=HTMLResponse)
 def admin_home(request: Request, db: Session = Depends(get_db)):
     settings_data = admin_get_settings(db)
@@ -4241,20 +6433,61 @@ def admin_home(request: Request, db: Session = Depends(get_db)):
 
 @app.get("/onboarding", response_class=HTMLResponse)
 def onboarding_home(request: Request, db: Session = Depends(get_db)):
-    profile = admin_get_profile(db)
-    settings_data = admin_get_settings(db)
-    children = admin_get_children(db)
-    prefs = admin_get_preferences(db)
-    return templates.TemplateResponse(
-        request,
-        "onboarding.html",
-        {
-            "profile": profile,
-            "settings": settings_data,
-            "children": children,
-            "prefs": prefs,
-        },
+    return templates.TemplateResponse(request, "onboarding.html", _onboarding_context(db))
+
+
+def _onboarding_context(db: Session) -> dict:
+    credential = db.scalar(
+        select(GoogleCredential).where(GoogleCredential.household_id == 1, GoogleCredential.status == "active")
     )
+    return {
+        "profile": admin_get_profile(db),
+        "settings": admin_get_settings(db),
+        "children": admin_get_children(db),
+        "prefs": admin_get_preferences(db),
+        "calendar_connected": credential is not None,
+        "calendar_email": credential.provider_user_email if credential else None,
+    }
+
+
+@app.get("/onboarding/design-gallery", response_class=HTMLResponse)
+def onboarding_gallery(request: Request, db: Session = Depends(get_db)):
+    return templates.TemplateResponse(request, "onboarding_gallery.html", _onboarding_context(db))
+
+
+@app.get("/onboarding/v1", response_class=HTMLResponse)
+def onboarding_v1(request: Request, db: Session = Depends(get_db)):
+    return templates.TemplateResponse(request, "onboarding_v1.html", _onboarding_context(db))
+
+
+@app.get("/onboarding/v2", response_class=HTMLResponse)
+def onboarding_v2(request: Request, db: Session = Depends(get_db)):
+    return templates.TemplateResponse(request, "onboarding_v2.html", _onboarding_context(db))
+
+
+@app.get("/onboarding/v3", response_class=HTMLResponse)
+def onboarding_v3(request: Request, db: Session = Depends(get_db)):
+    return templates.TemplateResponse(request, "onboarding_v3.html", _onboarding_context(db))
+
+
+@app.get("/onboarding/v4", response_class=HTMLResponse)
+def onboarding_v4(request: Request, db: Session = Depends(get_db)):
+    return templates.TemplateResponse(request, "onboarding_v4.html", _onboarding_context(db))
+
+
+@app.get("/onboarding/v5", response_class=HTMLResponse)
+def onboarding_v5(request: Request, db: Session = Depends(get_db)):
+    return templates.TemplateResponse(request, "onboarding_v5.html", _onboarding_context(db))
+
+
+@app.get("/onboarding/v6", response_class=HTMLResponse)
+def onboarding_v6(request: Request, db: Session = Depends(get_db)):
+    return templates.TemplateResponse(request, "onboarding_v6.html", _onboarding_context(db))
+
+
+@app.get("/onboarding/v7", response_class=HTMLResponse)
+def onboarding_legacy_redirect(request: Request, db: Session = Depends(get_db)):
+    return RedirectResponse(url="/onboarding", status_code=307)
 
 
 @app.get("/admin/activity", response_class=HTMLResponse)
@@ -4279,6 +6512,16 @@ def design_language_page(request: Request):
     return templates.TemplateResponse(request, "design_language.html", {})
 
 
+@app.get("/architecture-diagrams", response_class=HTMLResponse)
+def architecture_diagrams_page(request: Request):
+    return templates.TemplateResponse(request, "architecture_diagrams.html", {})
+
+
+@app.get("/architecture-diagrams-agentsdk", response_class=HTMLResponse)
+def architecture_diagrams_agentsdk_page(request: Request):
+    return templates.TemplateResponse(request, "architecture_diagrams_agentsdk.html", {})
+
+
 @app.post("/admin/settings/form")
 def admin_settings_form(
     daily_summary_enabled: bool = Form(default=False),
@@ -4296,31 +6539,57 @@ def admin_settings_form(
 
 
 @app.post("/admin/children/form")
-def admin_child_form(name: str = Form(), school_name: str = Form(), grade: str = Form(default=""), db: Session = Depends(get_db)):
-    return admin_create_child(ChildIn(name=name, school_name=school_name, grade=grade), db)
-
-
-@app.post("/admin/preferences/form")
-def admin_pref_form(
-    raw_text: str = Form(default=""),
-    user_priority_topics: str = Form(default=""),
-    system_default_school_closures: bool = Form(default=False),
-    system_default_grade_relevant: bool = Form(default=False),
+def admin_child_form(
+    name: str = Form(),
+    school_name: str = Form(),
+    grade: str = Form(default=""),
+    teacher_contacts_text: str = Form(default=""),
     db: Session = Depends(get_db),
 ):
-    topics = [item.strip() for item in user_priority_topics.split("\n") if item.strip()]
-    return admin_put_preferences(
-        PreferenceIn(
-            raw_text=raw_text,
-            system_defaults={
-                "school_closures": system_default_school_closures,
-                "grade_relevant": system_default_grade_relevant,
-            },
-            user_priority_topics=topics,
-            structured_json={},
+    return admin_create_child(
+        ChildIn(
+            name=name,
+            school_name=school_name,
+            grade=grade,
+            teacher_contacts=_parse_teacher_contacts_text(teacher_contacts_text),
         ),
         db,
     )
+
+
+@app.post("/admin/preferences/form")
+async def admin_pref_form(request: Request, db: Session = Depends(get_db)):
+    form = await request.form()
+    action = str(form.get("prefs_action") or "save")
+    structured_json: dict = {}
+    has_admin_topic_fields = "admin_priority_topics_text" in form or "admin_suppressed_priority_topics_text" in form
+    if action == "regenerate":
+        structured_json = {
+            "admin_override_active": False,
+            "admin_priority_topics": [],
+            "admin_suppressed_priority_topics": [],
+        }
+    elif has_admin_topic_fields:
+        structured_json = {
+            "admin_override_active": True,
+            "admin_priority_topics": _parse_topic_lines(str(form.get("admin_priority_topics_text") or "")),
+            "admin_suppressed_priority_topics": _parse_topic_lines(
+                str(form.get("admin_suppressed_priority_topics_text") or "")
+            ),
+        }
+    admin_put_preferences(
+        PreferenceIn(
+            raw_text=str(form.get("raw_text") or ""),
+            system_defaults={
+                "school_closures": "system_default_school_closures" in form,
+                "grade_relevant": "system_default_grade_relevant" in form,
+            },
+            user_priority_topics=[],
+            structured_json=structured_json,
+        ),
+        db,
+    )
+    return RedirectResponse(url="/admin", status_code=303)
 
 
 @app.post("/admin/calendar-binding/form")
@@ -4344,37 +6613,31 @@ def admin_calendar_binding_form(
     )
 
 
-@app.post("/admin/pending-events/{pending_id}/confirm/form")
-def admin_confirm_form(pending_id: int, db: Session = Depends(get_db)):
-    raise HTTPException(status_code=410, detail="Pending review is no longer part of the admin experience")
-
-
-@app.post("/admin/pending-events/{pending_id}/reject/form")
-def admin_reject_form(pending_id: int, db: Session = Depends(get_db)):
-    raise HTTPException(status_code=410, detail="Pending review is no longer part of the admin experience")
-
-
 @app.post("/onboarding/profile/form")
 def onboarding_profile_form(
-    admin_email: str = Form(),
-    secondary_admin_email: str = Form(default=""),
+    admin_email: str = Form(default=""),
     admin_phone: str = Form(default=""),
-    timezone_value: str = Form(default="UTC"),
-    spouse_phone: str = Form(default=""),
-    spouse_notifications_enabled: bool = Form(default=False),
+    timezone_value: str = Form(default=""),
     db: Session = Depends(get_db),
 ):
-    return admin_put_profile(
-        HouseholdProfileIn(
-            admin_email=admin_email,
-            secondary_admin_email=secondary_admin_email,
-            admin_phone=admin_phone,
-            timezone=timezone_value,
-            spouse_phone=spouse_phone,
-            spouse_notifications_enabled=spouse_notifications_enabled,
-        ),
-        db,
-    )
+    household = db.scalar(select(Household).where(Household.id == 1))
+    admins = db.scalars(
+        select(User).where(User.household_id == 1, User.is_admin.is_(True)).order_by(User.id.asc())
+    ).all()
+    assert household is not None
+    if admins:
+        admin = admins[0]
+        normalized_email = admin_email.strip().lower()
+        if normalized_email:
+            admin.email = normalized_email
+        admin.phone = admin_phone.strip() or None
+        for extra_admin in admins[1:]:
+            db.delete(extra_admin)
+    timezone_name = timezone_value.strip()
+    if timezone_name:
+        _set_household_timezone(db, household.id, timezone_name)
+    db.commit()
+    return {"ok": True}
 
 
 @app.post("/onboarding/settings/form")
@@ -4393,28 +6656,51 @@ def onboarding_settings_form(
 
 
 @app.post("/onboarding/preferences/form")
-def onboarding_preferences_form(
-    raw_text: str = Form(default=""),
-    user_priority_topics: str = Form(default=""),
-    system_default_school_closures: bool = Form(default=False),
-    system_default_grade_relevant: bool = Form(default=False),
-    db: Session = Depends(get_db),
-):
-    topics = [item.strip() for item in user_priority_topics.split("\n") if item.strip()]
-    return admin_put_preferences(
+async def onboarding_preferences_form(request: Request, db: Session = Depends(get_db)):
+    form = await request.form()
+    admin_put_preferences(
         PreferenceIn(
-            raw_text=raw_text,
+            raw_text=str(form.get("raw_text") or ""),
             system_defaults={
-                "school_closures": system_default_school_closures,
-                "grade_relevant": system_default_grade_relevant,
+                "school_closures": "system_default_school_closures" in form,
+                "grade_relevant": "system_default_grade_relevant" in form,
             },
-            user_priority_topics=topics,
+            user_priority_topics=[],
             structured_json={},
         ),
         db,
     )
+    return RedirectResponse(url="/onboarding", status_code=303)
+
+
+@app.post("/onboarding/preferences/preview")
+async def onboarding_preferences_preview(request: Request):
+    form = await request.form()
+    raw_text = str(form.get("raw_text") or "").strip()
+    if not raw_text:
+        return {"positive_topics": [], "negative_topics": [], "status": "empty"}
+    parsed = _parse_preference_notes(raw_text)
+    return {
+        "positive_topics": parsed.get("positive_topics", []),
+        "negative_topics": parsed.get("negative_topics", []),
+        "status": parsed.get("status", "success"),
+    }
 
 
 @app.post("/onboarding/children/form")
-def onboarding_child_form(name: str = Form(), school_name: str = Form(), grade: str = Form(default=""), db: Session = Depends(get_db)):
-    return admin_create_child(ChildIn(name=name, school_name=school_name, grade=grade), db)
+def onboarding_child_form(
+    name: str = Form(),
+    school_name: str = Form(),
+    grade: str = Form(default=""),
+    teacher_contacts_text: str = Form(default=""),
+    db: Session = Depends(get_db),
+):
+    return admin_create_child(
+        ChildIn(
+            name=name,
+            school_name=school_name,
+            grade=grade,
+            teacher_contacts=_parse_teacher_contacts_text(teacher_contacts_text),
+        ),
+        db,
+    )

@@ -34,4 +34,11 @@
 
 ## Project Context
 - This repo is the LovelyChaos app workspace.
+- LovelyChaos should behave like a helpful assistant for school communication, not just a date/event operator.
+- It should explain what matters in plain language, support conversational follow-ups, and only act like a calendar operator when the user is clearly asking for scheduling help.
 - The Gmail tooling is intentionally isolated from app runtime code and dependencies so local mailbox testing does not alter product configuration.
+
+## OpenAI API Rules
+- Prefer the OpenAI Responses API for all new and updated model integrations in this repo.
+- Do not add new Chat Completions integrations when the same behavior is available through Responses API.
+- When touching OpenAI code, verify the current official OpenAI docs first and keep payloads aligned with the latest Responses API and tracing guidance.

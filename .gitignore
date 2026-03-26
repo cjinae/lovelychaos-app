@@ -4,5 +4,10 @@ __pycache__/
 *.pyc
 .venv/
 lovelychaos.db
+lovelychaos.db-shm
+lovelychaos.db-wal
+lovelychaos.db.backup-*
+lovelychaos.db.pre_alembic_backup
++%Y%m%d-%H%M%S)
 .env
 .local/
