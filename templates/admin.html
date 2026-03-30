@@ -217,33 +217,57 @@
       <div class="lc-card__head">
         <p class="lc-eyebrow">Calendar</p>
         <h2 class="lc-card__title">Provider binding</h2>
-        <p class="lc-card__copy">Keep calendar credentials and ownership metadata in one structured panel.</p>
+        <p class="lc-card__copy">Connected as <strong>{{ calendar.provider_user_email }}</strong>. Events are added to the selected calendar.</p>
       </div>
-      <form class="lc-form" method="post" action="/admin/calendar-binding/form">
-        <div class="lc-form-grid lc-form-grid--two">
-          <label class="lc-field">
-            <span class="lc-field__label">Provider user email</span>
-            <input class="lc-input" name="provider_user_email" value="{{ calendar.provider_user_email }}" required />
-          </label>
-          <label class="lc-field">
-            <span class="lc-field__label">Token subject</span>
-            <input class="lc-input" name="token_subject" value="{{ calendar.token_subject }}" required />
-          </label>
-          <label class="lc-field">
-            <span class="lc-field__label">Calendar ID</span>
-            <input class="lc-input" name="calendar_id" value="{{ calendar.calendar_id }}" required />
-          </label>
-          <label class="lc-field">
-            <span class="lc-field__label">Calendar owner email</span>
-            <input class="lc-input" name="calendar_owner_email" value="{{ calendar.calendar_owner_email }}" required />
-          </label>
+
+      <!-- Current calendar display -->
+      <div id="admin-cal-confirmed" style="display:flex; align-items:center; gap:10px; padding:12px 16px; background:rgba(80,160,100,0.08); border:1px solid rgba(80,160,100,0.25); border-radius:14px; margin-bottom:16px; font-size:14px; font-weight:500; color:#2e7d47;">
+        <span id="admin-cal-name">📅 {{ calendar.calendar_name or calendar.calendar_id or 'No calendar selected' }}</span>
+        <button type="button" id="admin-cal-change-btn" style="margin-left:auto; font-size:12px; font-weight:600; color:#7a706a; cursor:pointer; text-decoration:underline; text-underline-offset:2px; background:none; border:none; padding:0; font-family:inherit;">Change</button>
+      </div>
+
+      <!-- Picker (hidden by default) -->
+      <div id="admin-cal-picker-ui" style="display:none;">
+        <p style="font-size:12px; font-weight:700; letter-spacing:0.12em; text-transform:uppercase; color:#7a706a; margin-bottom:10px;">Select a calendar</p>
+        <div id="admin-cal-picker-list" style="display:flex; flex-direction:column; gap:6px; margin-bottom:12px;">
+          <p style="font-size:13px; color:#7a706a;">Loading…</p>
         </div>
-        <label class="lc-field">
-          <span class="lc-field__label">Access token</span>
-          <input class="lc-input" name="access_token" value="" placeholder="Paste a fresh access token" required />
-        </label>
-        <button class="lc-button" type="submit">Save calendar binding</button>
-      </form>
+        <div id="admin-cal-new-row" style="display:none; gap:8px; margin-bottom:12px;">
+          <input id="admin-cal-new-name" type="text" placeholder="New calendar name" maxlength="100"
+            style="flex:1; min-height:40px; padding:0 14px; border:1px solid rgba(200,190,180,0.5); border-radius:12px; background:#fdfaf7; font-family:inherit; font-size:14px; outline:none;" />
+        </div>
+        <button type="button" id="admin-cal-confirm-btn" class="lc-button" disabled style="opacity:0.5;">Use this calendar</button>
+        <button type="button" id="admin-cal-cancel-btn" class="lc-button lc-button--secondary" style="margin-left:8px;">Cancel</button>
+      </div>
+
+      <details style="margin-top:20px;">
+        <summary style="font-size:12px; font-weight:600; letter-spacing:0.08em; text-transform:uppercase; color:#7a706a; cursor:pointer; user-select:none;">Advanced: raw credential</summary>
+        <form class="lc-form" method="post" action="/admin/calendar-binding/form" style="margin-top:14px;">
+          <div class="lc-form-grid lc-form-grid--two">
+            <label class="lc-field">
+              <span class="lc-field__label">Provider user email</span>
+              <input class="lc-input" name="provider_user_email" value="{{ calendar.provider_user_email }}" required />
+            </label>
+            <label class="lc-field">
+              <span class="lc-field__label">Token subject</span>
+              <input class="lc-input" name="token_subject" value="{{ calendar.token_subject }}" required />
+            </label>
+            <label class="lc-field">
+              <span class="lc-field__label">Calendar ID</span>
+              <input class="lc-input" name="calendar_id" value="{{ calendar.calendar_id }}" required />
+            </label>
+            <label class="lc-field">
+              <span class="lc-field__label">Calendar owner email</span>
+              <input class="lc-input" name="calendar_owner_email" value="{{ calendar.calendar_owner_email }}" required />
+            </label>
+          </div>
+          <label class="lc-field">
+            <span class="lc-field__label">Access token</span>
+            <input class="lc-input" name="access_token" value="" placeholder="Paste a fresh access token" required />
+          </label>
+          <button class="lc-button" type="submit">Save raw binding</button>
+        </form>
+      </details>
     </article>
   </section>
 
@@ -315,6 +339,112 @@
           activeContainer = null;
         }
       });
+    })();
+
+    // ── Admin calendar picker ──
+    (() => {
+      const pickerUI = document.getElementById('admin-cal-picker-ui');
+      const pickerList = document.getElementById('admin-cal-picker-list');
+      const newRow = document.getElementById('admin-cal-new-row');
+      const newNameInput = document.getElementById('admin-cal-new-name');
+      const confirmBtn = document.getElementById('admin-cal-confirm-btn');
+      const cancelBtn = document.getElementById('admin-cal-cancel-btn');
+      const changeBtn = document.getElementById('admin-cal-change-btn');
+      const confirmedEl = document.getElementById('admin-cal-confirmed');
+      const calNameEl = document.getElementById('admin-cal-name');
+      if (!pickerUI) return;
+
+      let selectedId = '';
+      let selectedName = '';
+      let isNewCalendar = false;
+      let loaded = false;
+
+      async function loadCalendars() {
+        if (loaded) return;
+        loaded = true;
+        try {
+          const r = await fetch('/admin/calendar-list');
+          if (!r.ok) { pickerList.innerHTML = '<p style="font-size:13px;color:#7a706a;">Could not load calendars.</p>'; return; }
+          renderCalendars(await r.json());
+        } catch (_) {
+          pickerList.innerHTML = '<p style="font-size:13px;color:#7a706a;">Could not load calendars.</p>';
+        }
+      }
+
+      function renderCalendars(calendars) {
+        pickerList.innerHTML = '';
+        for (const cal of calendars) {
+          const lbl = document.createElement('label');
+          lbl.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px 14px;border:1px solid #e8e0d8;border-radius:12px;background:#fdfaf7;cursor:pointer;font-size:14px;transition:background 120ms;';
+          lbl.innerHTML = `<input type="radio" name="admin-cal-pick" value="${cal.id}" style="accent-color:#d94f43;flex-shrink:0;"> <span style="flex:1;font-weight:500;">${cal.summary || cal.id}</span>${cal.primary ? '<span style="font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#d94f43;background:hsl(4 78% 97%);border:1px solid rgba(217,79,67,.2);border-radius:999px;padding:2px 8px;">Default</span>' : ''}`;
+          lbl.querySelector('input').addEventListener('change', () => {
+            pickerList.querySelectorAll('label').forEach(o => o.style.borderColor = '#e8e0d8');
+            lbl.style.borderColor = '#d94f43';
+            selectedId = cal.id;
+            selectedName = cal.summary || cal.id;
+            isNewCalendar = false;
+            newRow.style.display = 'none';
+            confirmBtn.disabled = false;
+            confirmBtn.style.opacity = '1';
+          });
+          pickerList.appendChild(lbl);
+        }
+        const newLbl = document.createElement('label');
+        newLbl.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px 14px;border:1px solid #e8e0d8;border-radius:12px;background:#fdfaf7;cursor:pointer;font-size:14px;transition:background 120ms;';
+        newLbl.innerHTML = `<input type="radio" name="admin-cal-pick" value="__new__" style="accent-color:#d94f43;flex-shrink:0;"> <span style="flex:1;font-weight:500;">+ Create a new calendar…</span>`;
+        newLbl.querySelector('input').addEventListener('change', () => {
+          pickerList.querySelectorAll('label').forEach(o => o.style.borderColor = '#e8e0d8');
+          newLbl.style.borderColor = '#d94f43';
+          isNewCalendar = true;
+          selectedId = '';
+          newRow.style.display = 'flex';
+          newNameInput.focus();
+          confirmBtn.disabled = !newNameInput.value.trim();
+          confirmBtn.style.opacity = confirmBtn.disabled ? '0.5' : '1';
+        });
+        pickerList.appendChild(newLbl);
+      }
+
+      if (newNameInput) {
+        newNameInput.addEventListener('input', () => {
+          if (isNewCalendar) {
+            confirmBtn.disabled = !newNameInput.value.trim();
+            confirmBtn.style.opacity = confirmBtn.disabled ? '0.5' : '1';
+          }
+        });
+      }
+
+      async function confirmSelection() {
+        confirmBtn.disabled = true;
+        confirmBtn.style.opacity = '0.5';
+        try {
+          if (isNewCalendar) {
+            const name = newNameInput.value.trim();
+            if (!name) { confirmBtn.disabled = false; confirmBtn.style.opacity = '1'; return; }
+            const r = await fetch('/admin/calendar-new', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+            if (!r.ok) { confirmBtn.disabled = false; confirmBtn.style.opacity = '1'; return; }
+            const data = await r.json();
+            updateConfirmed(data.calendar_name || name);
+          } else {
+            const r = await fetch('/admin/calendar-select', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ calendar_id: selectedId, calendar_name: selectedName }) });
+            if (!r.ok) { confirmBtn.disabled = false; confirmBtn.style.opacity = '1'; return; }
+            updateConfirmed(selectedName);
+          }
+          pickerUI.style.display = 'none';
+          confirmedEl.style.display = 'flex';
+        } catch (_) {
+          confirmBtn.disabled = false;
+          confirmBtn.style.opacity = '1';
+        }
+      }
+
+      function updateConfirmed(name) {
+        if (calNameEl) calNameEl.textContent = `📅 ${name}`;
+      }
+
+      if (confirmBtn) confirmBtn.addEventListener('click', confirmSelection);
+      if (cancelBtn) cancelBtn.addEventListener('click', () => { pickerUI.style.display = 'none'; confirmedEl.style.display = 'flex'; });
+      if (changeBtn) changeBtn.addEventListener('click', () => { confirmedEl.style.display = 'none'; pickerUI.style.display = ''; loadCalendars(); });
     })();
   </script>
 {% endblock %}

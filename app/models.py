@@ -59,6 +59,7 @@ class CalendarBinding(Base):
     household_id: Mapped[int] = mapped_column(ForeignKey("households.id"), index=True)
     google_credential_id: Mapped[int] = mapped_column(ForeignKey("google_credentials.id"), index=True)
     calendar_id: Mapped[str] = mapped_column(String(255))
+    calendar_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     calendar_owner_email: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(32), default="active")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

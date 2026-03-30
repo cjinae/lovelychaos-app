@@ -39,7 +39,15 @@ These tools use application code for target resolution, tenant checks, Google Ca
 - Summary extraction/compression remains a separate structured-output pipeline.
 - Existing followup-context resolution remains the canonical source for ambiguous `"this"`/`"that one"` add flows.
 
+## Session & Thread State
+
+- Agent sessions are scoped per email thread key (`thread_key` from message-id/references headers) or per SMS household (`sms:{household_id}`).
+- Session items are persisted in `AgentSessionItem` via `DbBackedAgentSession` in `app/services/agent_threads.py`.
+- PDF and attachment text is persisted as `ThreadDocument` rows so follow-up messages in the same thread can reference attachment content without re-downloading.
+- Tracing is managed per-request via `app/services/openai_tracing.py` using `OPENAI_TRACING_ENABLED`.
+
 ## Notes
 
-- The OpenAI command parser now supports `update` in addition to add/read/delete/reminder/preference actions.
+- The OpenAI command parser supports `update` in addition to add/read/delete/reminder/preference actions.
 - The command execution agent uses function tools for stateful operations and keeps mutation authority in app code.
+- Complex forwarded/context-heavy add flows use the `add_requests.py` resolution pipeline, which handles candidate extraction, disambiguation, and validation before handing off to calendar tools.

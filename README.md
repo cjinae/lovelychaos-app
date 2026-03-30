@@ -31,10 +31,12 @@ The current product is no longer a "Phase 1" stub. The codebase now includes liv
   - supports add, delete, and reminder workflows
   - supports mock and live Google Calendar providers
 - Conversational follow-up:
-  - email and SMS can request `add`, `more_info`, `delete`, `remind`, and `set_preference`
+  - email and SMS can request `add`, `more_info`, `delete`, `remind`, `update`, and `set_preference`
   - `more_info` replies should feel assistant-like and grounded, paraphrasing the school update instead of copying source text back to the parent
   - SMS keeps short-lived numbered disambiguation state when a reply could refer to multiple recent items
   - follow-up context is persisted so later replies can resolve "this", topic names, or numbered selections
+  - per-thread conversation history is stored in the database and available to the command execution agent across requests
+  - PDF and attachment text is persisted per email thread so follow-up messages can reference attachment content without re-downloading
 - Operator surfaces:
   - onboarding flow for family profile, children, schools, priority profile, and calendar connection
   - admin console for settings, children, teacher contacts, preferences, calendar binding, digests, notifications, and inbound activity
@@ -47,6 +49,7 @@ The current product is no longer a "Phase 1" stub. The codebase now includes liv
 - SQLite for local development, Postgres via `DATABASE_URL` in deployment
 - Jinja templates for onboarding/admin UI
 - OpenAI Responses API for live extraction, command parsing, preference parsing, summary compression, and PDF OCR
+- OpenAI agents SDK (`openai_agents` runtime) for command execution with tool calls and SQLAlchemy-backed session storage
 - Google Calendar API for live calendar mutations
 - Resend for inbound email normalization and live outbound email
 - Twilio for inbound and outbound SMS
@@ -107,6 +110,7 @@ Notifications and provider webhooks:
 Testing override:
 
 - `LOCAL_TEST_RESPONSE_CHANNEL_OVERRIDE`
+- `LOCAL_TEST_ADMIN_EMAIL`
 
 ## Migrations
 
@@ -116,7 +120,7 @@ make db-downgrade
 make db-revision m="describe change"
 ```
 
-Recent schema changes in the current product include SMS conversation state, teacher contacts, and removal of older batch/pending routing concepts.
+Recent schema additions include SMS conversation state, teacher contacts, agent session items (multi-turn conversation history), thread documents (per-thread attachment/PDF text), and removal of older batch/pending routing concepts.
 
 ## Main routes
 
@@ -181,6 +185,7 @@ Examples the current parser handles:
 - `delete 42`
 - `remind 42 30m sms`
 - `remind 42 45m calendar`
+- `change the time on pizza lunch to 12:30`
 - `please keep adding pizza lunches`
 - `I don't care about school council events`
 
@@ -190,6 +195,7 @@ Supported actions are:
 - `more_info`
 - `delete`
 - `remind`
+- `update`
 - `set_preference`
 
 Older "confirm" style commands are not part of the current command model.

@@ -182,6 +182,7 @@ def build_brief_summary(
     informational_only: Optional[bool] = None,
     reference_datetime_hint: str = "",
     document_understanding: Optional[dict] = None,
+    skip_candidate_extraction: bool = False,
 ) -> tuple[SummaryResult, dict]:
     summary_context = _prefilter_summary_context(
         subject=subject,
@@ -209,32 +210,44 @@ def build_brief_summary(
     prompt_examples = _trim_summary_prompt_examples(knowledge_context.retrieved_examples)
 
     fallback_candidates = list(summary_context["fallback_candidates"])
-    try:
-        extracted_summary = engine.extract_summary_candidates(
-            {
-                "title_hint": summary_context["title_hint"],
-                "household_context": summary_context["household_context"],
-                "enabled_system_defaults": summary_context["enabled_system_defaults"],
-                "user_priority_topics": summary_context["user_priority_topics"],
-                "event_facts": summary_context["event_facts"],
-                "kept_sections": summary_context["kept_sections"],
-                "notes": summary_context["notes"],
-                "missing_requested_topics": summary_context["missing_requested_topics"],
-                "fallback_candidates": fallback_candidates,
-                "domain_taxonomy_hints": knowledge_context.matched_topics,
-                "retrieved_examples": prompt_examples,
-                "retrieval_notes": knowledge_context.retrieval_notes,
-                "matched_event_types": knowledge_context.matched_event_types,
-                "commonness_hints": knowledge_context.commonness_hints,
-            }
-        )
-    except Exception:
+
+    if skip_candidate_extraction:
+        # Fast path: unified extraction already produced structured events + topics.
+        # Use fallback candidates directly (built from events + doc understanding topics)
+        # without an additional LLM call for candidate extraction.
         extracted_summary = {
             "title": summary_context["title_hint"],
             "candidates": fallback_candidates,
             "notes": list(summary_context["notes"]),
             "missing_requested_topics": list(summary_context["missing_requested_topics"]),
         }
+    else:
+        try:
+            extracted_summary = engine.extract_summary_candidates(
+                {
+                    "title_hint": summary_context["title_hint"],
+                    "household_context": summary_context["household_context"],
+                    "enabled_system_defaults": summary_context["enabled_system_defaults"],
+                    "user_priority_topics": summary_context["user_priority_topics"],
+                    "event_facts": summary_context["event_facts"],
+                    "kept_sections": summary_context["kept_sections"],
+                    "notes": summary_context["notes"],
+                    "missing_requested_topics": summary_context["missing_requested_topics"],
+                    "fallback_candidates": fallback_candidates,
+                    "domain_taxonomy_hints": knowledge_context.matched_topics,
+                    "retrieved_examples": prompt_examples,
+                    "retrieval_notes": knowledge_context.retrieval_notes,
+                    "matched_event_types": knowledge_context.matched_event_types,
+                    "commonness_hints": knowledge_context.commonness_hints,
+                }
+            )
+        except Exception:
+            extracted_summary = {
+                "title": summary_context["title_hint"],
+                "candidates": fallback_candidates,
+                "notes": list(summary_context["notes"]),
+                "missing_requested_topics": list(summary_context["missing_requested_topics"]),
+            }
 
     merged_candidates = _prune_redundant_dated_candidates(
         _merge_summary_candidates(fallback_candidates, extracted_summary.get("candidates") or [])
@@ -444,7 +457,11 @@ def _prefilter_summary_context(
     )
     fallback_candidates = _merge_summary_candidates(
         fallback_candidates,
-        _document_understanding_candidates(document_understanding),
+        _document_understanding_candidates(
+            document_understanding,
+            user_priority_topics=normalized_user_topics,
+            suppressed_priority_topics=normalized_suppressed_topics,
+        ),
     )
     missing_requested_topics = _detect_missing_requested_topics(normalized_user_topics, analysis_text, fallback_candidates)
     return {
@@ -484,9 +501,15 @@ def _document_understanding_notes(document_understanding: Optional[dict]) -> lis
     return _dedupe_strings(notes)[:SUMMARY_NOTES_LIMIT]
 
 
-def _document_understanding_candidates(document_understanding: Optional[dict]) -> list[dict]:
+def _document_understanding_candidates(
+    document_understanding: Optional[dict],
+    user_priority_topics: list[str] | None = None,
+    suppressed_priority_topics: list[str] | None = None,
+) -> list[dict]:
     if not isinstance(document_understanding, dict):
         return []
+    positive_topics = list(user_priority_topics or [])
+    suppressed_topics = list(suppressed_priority_topics or [])
     candidates: list[dict] = []
     for bucket_name, priority in (("actionable_topics", "important"), ("informational_topics", "mentioned")):
         for index, topic in enumerate(list(document_understanding.get(bucket_name) or []), start=1):
@@ -503,12 +526,15 @@ def _document_understanding_candidates(document_understanding: Optional[dict]) -
                 text = f"{text}: {timing_hint}"
             elif why_it_matters:
                 text = f"{text}: {why_it_matters}"
+            matched_user = [t for t in positive_topics if topic_matches_text(t, title, why_it_matters)]
+            matched_suppressed = [t for t in suppressed_topics if topic_matches_text(t, title, why_it_matters)]
             candidates.append(
                 {
                     "text": text,
                     "consolidated_priority": priority,
                     "matched_system_defaults": [],
-                    "matched_user_priorities": [],
+                    "matched_user_priorities": matched_user,
+                    "matched_suppressed_topics": matched_suppressed,
                     "source_refs": [f"document_understanding:{bucket_name}:{index}"],
                     "applies_to": [],
                     "date_sort_key": None,
@@ -1404,8 +1430,11 @@ def _lines_semantically_overlap(left: dict, right: dict) -> bool:
         return False
     if left_tokens <= right_tokens or right_tokens <= left_tokens:
         return True
+    # Use a lower threshold (60%) for same-date cross-source candidates
+    # where phrasing may differ but the event is the same
+    threshold = 0.60 if left_day and left_day == right_day else 0.75
     overlap_ratio = len(shared) / min(len(left_tokens), len(right_tokens))
-    return overlap_ratio >= 0.75
+    return overlap_ratio >= threshold
 
 
 def _summary_overlap_tokens(text: str) -> set[str]:

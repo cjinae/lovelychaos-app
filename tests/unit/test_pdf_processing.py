@@ -6,7 +6,7 @@ from app.services.content_analysis import maybe_extract_pdf_text
 
 def test_maybe_extract_pdf_text_uses_first_sufficient_parser(monkeypatch):
     monkeypatch.setattr(
-        "app.services.content_analysis._extract_pdf_text_with_pymupdf",
+        "app.services.content_analysis._extract_pdf_text_with_pymupdf_tables",
         lambda _content: "Page 1:\nOpen House on October 7 at 6:00 PM\n" * 3,
     )
     monkeypatch.setattr(

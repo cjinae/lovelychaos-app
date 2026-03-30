@@ -47,6 +47,8 @@ class Settings:
     }
     openai_timeout_sec: int = int(os.getenv("OPENAI_TIMEOUT_SEC", "20"))
     openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    unified_extraction_char_limit: int = int(os.getenv("UNIFIED_EXTRACTION_CHAR_LIMIT", "30000"))
+    unified_extraction_max_attachments: int = int(os.getenv("UNIFIED_EXTRACTION_MAX_ATTACHMENTS", "1"))
     local_test_response_channel_override: str = os.getenv("LOCAL_TEST_RESPONSE_CHANNEL_OVERRIDE", "").strip().lower()
     local_test_admin_email: str = os.getenv("LOCAL_TEST_ADMIN_EMAIL", "").strip().lower()
     admin_api_key: str = os.getenv("ADMIN_API_KEY", "")

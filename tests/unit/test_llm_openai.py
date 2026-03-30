@@ -184,7 +184,7 @@ def test_openai_engine_understand_document_uses_agent_sdk(monkeypatch):
     assert captured["prompt_version"] == DOCUMENT_UNDERSTANDING_PROMPT_VERSION
     assert captured["use_session"] is False
     assert captured["inject_conversation_context"] is True
-    assert "document understanding assistant" in captured["system_prompt"].lower()
+    assert "school communication assistant" in captured["system_prompt"].lower()
     assert DOCUMENT_UNDERSTANDING_SYSTEM_PROMPT == captured["system_prompt"]
     assert "forwarded_subject" in captured["user_payload"]
     assert "newsletter.pdf" in captured["user_payload"]
@@ -336,7 +336,7 @@ def test_prompt_constants_are_explicit():
     assert "Extract every distinct event mention" in EXTRACTION_SYSTEM_PROMPT
     assert "Do not use household preferences as a filter" in EXTRACTION_SYSTEM_PROMPT
     assert "infer the same year" in EXTRACTION_SYSTEM_PROMPT
-    assert "forwarded original-email metadata" in EXTRACTION_SYSTEM_PROMPT
+    assert "Forwarded email header lines" in EXTRACTION_SYSTEM_PROMPT
     assert "reference_datetime_hint" in EXTRACTION_SYSTEM_PROMPT
     assert "<output_contract>" in EXTRACTION_SYSTEM_PROMPT
     assert "<verification_loop>" in EXTRACTION_SYSTEM_PROMPT

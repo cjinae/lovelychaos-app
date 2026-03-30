@@ -211,6 +211,121 @@
   .school-suggestion:hover { background: rgba(240,234,226,0.8); }
   .school-suggestion.is-active { background: rgba(240,234,226,0.95); }
 
+  /* ── Calendar picker ── */
+  .cal-picker {
+    margin-top: 20px;
+    border-top: 1px solid var(--lc-line);
+    padding-top: 20px;
+  }
+  .cal-picker__label {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--lc-ink-soft);
+    margin-bottom: 10px;
+    display: block;
+  }
+  .cal-picker__list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+  .cal-picker__option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border: 1px solid var(--lc-line);
+    border-radius: 12px;
+    background: #fdfaf7;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  .cal-picker__option:hover { background: rgba(240,234,226,0.6); }
+  .cal-picker__option input[type="radio"] { accent-color: var(--lc-accent); flex-shrink: 0; }
+  .cal-picker__option.is-selected { border-color: var(--lc-accent); background: var(--lc-accent-soft); }
+  .cal-picker__option-label { flex: 1; font-weight: 500; }
+  .cal-picker__option-badge {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--lc-accent);
+    background: var(--lc-accent-soft);
+    border: 1px solid rgba(217,79,67,0.2);
+    border-radius: 999px;
+    padding: 2px 8px;
+  }
+  .cal-picker__new-row {
+    display: none;
+    gap: 8px;
+    margin-top: 4px;
+    margin-bottom: 12px;
+  }
+  .cal-picker__new-row.is-visible { display: flex; }
+  .cal-picker__new-input {
+    flex: 1;
+    min-height: 40px;
+    padding: 0 14px;
+    border: 1px solid rgba(200,190,180,0.5);
+    border-radius: 12px;
+    background: #fdfaf7;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    color: var(--lc-ink);
+    outline: none;
+  }
+  .cal-picker__new-input:focus { border-color: var(--lc-accent); box-shadow: 0 0 0 3px rgba(217,79,67,0.1); }
+  .cal-picker__confirm {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+    padding: 0 18px;
+    background: var(--lc-ink);
+    color: #fdfaf7;
+    border: none;
+    border-radius: 999px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 120ms ease;
+  }
+  .cal-picker__confirm:hover { opacity: 0.85; }
+  .cal-picker__confirm:disabled { opacity: 0.5; cursor: default; }
+  .cal-picker__loading { font-size: 13px; color: var(--lc-ink-soft); padding: 8px 0; }
+  .cal-picker__confirmed {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: rgba(80,160,100,0.08);
+    border: 1px solid rgba(80,160,100,0.25);
+    border-radius: 12px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #2e7d47;
+    margin-bottom: 12px;
+  }
+  .cal-picker__change-link {
+    margin-left: auto;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--lc-ink-soft);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: inherit;
+  }
+  .cal-picker__change-link:hover { color: var(--lc-ink); }
+
   /* ── Step 1: Calendar connect ── */
   .wiz-cal-connect {
     display: flex;
@@ -379,7 +494,28 @@
       </div>
 
       {% if calendar_connected %}
-      <div style="margin-top: 24px; border-top: 1px solid var(--lc-line); padding-top: 20px;">
+
+      <!-- Calendar picker -->
+      <div class="cal-picker" id="cal-picker">
+        <span class="cal-picker__label">Which calendar should we use?</span>
+        {% if calendar_id %}
+        <div class="cal-picker__confirmed" id="cal-confirmed">
+          <span>📅 {{ calendar_name or calendar_id }}</span>
+          <button class="cal-picker__change-link" type="button" id="cal-change-btn">Change</button>
+        </div>
+        {% endif %}
+        <div id="cal-picker-ui" {% if calendar_id %}style="display:none"{% endif %}>
+          <div class="cal-picker__list" id="cal-picker-list">
+            <p class="cal-picker__loading">Loading your calendars…</p>
+          </div>
+          <div class="cal-picker__new-row" id="cal-new-row">
+            <input class="cal-picker__new-input" id="cal-new-name" type="text" placeholder="New calendar name, e.g. School" maxlength="100" />
+          </div>
+          <button class="cal-picker__confirm" type="button" id="cal-confirm-btn" disabled>Use this calendar →</button>
+        </div>
+      </div>
+
+      <div style="margin-top: 20px; border-top: 1px solid var(--lc-line); padding-top: 20px;">
         <form class="lc-form" method="post" action="/onboarding/profile/form" id="form-profile">
           <label class="lc-field">
             <span class="lc-field__label">Phone number</span>
@@ -728,6 +864,131 @@
       });
     }
     document.addEventListener('mousedown', (e) => { if (activeContainer && !e.target.closest('.school-autocomplete')) { clearSuggestions(activeContainer); activeContainer = null; } });
+  })();
+
+  // ── Calendar picker (onboarding step 1) ──
+  (() => {
+    const pickerUI = document.getElementById('cal-picker-ui');
+    const pickerList = document.getElementById('cal-picker-list');
+    const newRow = document.getElementById('cal-new-row');
+    const newNameInput = document.getElementById('cal-new-name');
+    const confirmBtn = document.getElementById('cal-confirm-btn');
+    const confirmedEl = document.getElementById('cal-confirmed');
+    const changeBtn = document.getElementById('cal-change-btn');
+    if (!pickerUI || !pickerList) return;
+
+    let selectedId = '';
+    let selectedName = '';
+    let isNewCalendar = false;
+
+    async function loadCalendars() {
+      try {
+        const r = await fetch('/admin/calendar-list');
+        if (!r.ok) { pickerList.innerHTML = '<p class="cal-picker__loading">Could not load calendars.</p>'; return; }
+        const calendars = await r.json();
+        renderCalendars(calendars);
+      } catch (_) {
+        pickerList.innerHTML = '<p class="cal-picker__loading">Could not load calendars.</p>';
+      }
+    }
+
+    function renderCalendars(calendars) {
+      pickerList.innerHTML = '';
+      for (const cal of calendars) {
+        const opt = document.createElement('label');
+        opt.className = 'cal-picker__option';
+        opt.innerHTML = `
+          <input type="radio" name="cal-pick" value="${cal.id}" />
+          <span class="cal-picker__option-label">${cal.summary || cal.id}</span>
+          ${cal.primary ? '<span class="cal-picker__option-badge">Default</span>' : ''}
+        `;
+        opt.querySelector('input').addEventListener('change', () => {
+          document.querySelectorAll('.cal-picker__option').forEach(o => o.classList.remove('is-selected'));
+          opt.classList.add('is-selected');
+          selectedId = cal.id;
+          selectedName = cal.summary || cal.id;
+          isNewCalendar = false;
+          newRow.classList.remove('is-visible');
+          confirmBtn.disabled = false;
+        });
+        pickerList.appendChild(opt);
+      }
+      // "Create new" option
+      const newOpt = document.createElement('label');
+      newOpt.className = 'cal-picker__option';
+      newOpt.innerHTML = `<input type="radio" name="cal-pick" value="__new__" /><span class="cal-picker__option-label">+ Create a new calendar…</span>`;
+      newOpt.querySelector('input').addEventListener('change', () => {
+        document.querySelectorAll('.cal-picker__option').forEach(o => o.classList.remove('is-selected'));
+        newOpt.classList.add('is-selected');
+        isNewCalendar = true;
+        selectedId = '';
+        newRow.classList.add('is-visible');
+        newNameInput.focus();
+        confirmBtn.disabled = !newNameInput.value.trim();
+      });
+      pickerList.appendChild(newOpt);
+    }
+
+    if (newNameInput) {
+      newNameInput.addEventListener('input', () => {
+        if (isNewCalendar) confirmBtn.disabled = !newNameInput.value.trim();
+      });
+    }
+
+    async function confirmSelection() {
+      confirmBtn.disabled = true;
+      try {
+        if (isNewCalendar) {
+          const name = newNameInput.value.trim();
+          if (!name) { confirmBtn.disabled = false; return; }
+          const r = await fetch('/admin/calendar-new', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+          });
+          if (!r.ok) { confirmBtn.disabled = false; return; }
+          const data = await r.json();
+          showConfirmed(data.calendar_name || name);
+        } else {
+          const r = await fetch('/admin/calendar-select', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ calendar_id: selectedId, calendar_name: selectedName }),
+          });
+          if (!r.ok) { confirmBtn.disabled = false; return; }
+          showConfirmed(selectedName);
+        }
+      } catch (_) {
+        confirmBtn.disabled = false;
+      }
+    }
+
+    function showConfirmed(name) {
+      pickerUI.style.display = 'none';
+      if (confirmedEl) {
+        confirmedEl.querySelector('span').textContent = `📅 ${name}`;
+        confirmedEl.style.display = 'flex';
+      } else {
+        const div = document.createElement('div');
+        div.className = 'cal-picker__confirmed';
+        div.id = 'cal-confirmed';
+        div.innerHTML = `<span>📅 ${name}</span><button class="cal-picker__change-link" type="button" id="cal-change-btn">Change</button>`;
+        div.querySelector('button').addEventListener('click', openPicker);
+        pickerUI.parentElement.insertBefore(div, pickerUI);
+      }
+    }
+
+    function openPicker() {
+      if (confirmedEl) confirmedEl.style.display = 'none';
+      pickerUI.style.display = '';
+      if (pickerList.querySelector('.cal-picker__loading')) loadCalendars();
+    }
+
+    if (confirmBtn) confirmBtn.addEventListener('click', confirmSelection);
+    if (changeBtn) changeBtn.addEventListener('click', openPicker);
+
+    // Auto-load if picker is shown (no calendar selected yet)
+    if (pickerUI.style.display !== 'none') loadCalendars();
   })();
 </script>
 {% endblock %}

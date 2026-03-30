@@ -28,26 +28,31 @@ SCHOOLMESSENGER_HOST_PATTERNS = (
 )
 MIN_EXTRACTED_TEXT_CHARS = 50
 OCR_PAGE_TEXT_PROMPT = """<output_contract>
-- Return only the OCR text for this single page as plain text.
-- Do not add commentary, markdown, summaries, or page labels beyond the extracted page text itself.
+- Return only the extracted text for this single page.
+- When the page contains a table or grid, reproduce it as a GitHub-flavored markdown pipe table (| col1 | col2 | ... |), preserving every row and column exactly. Never flatten table cells into prose.
+- For non-table content, return plain text in natural reading order.
+- Do not add commentary, summaries, or page labels beyond the extracted content itself.
 - If no readable text is present, return an empty string.
 </output_contract>
 
 <task>
-Extract all readable text from this PDF page image in natural reading order.
-Preserve headings, bullet lists, table-like rows, dates, times, and line breaks when they are readable.
+Extract all readable text from this PDF page image.
+1. First identify any tables or grids on the page.
+2. For each table: output a markdown pipe table with a header row and one data row per table row.
+3. For all other text: output in natural reading order, preserving headings, bullet lists, dates, times, and line breaks.
 </task>
 
 <grounding_rules>
 - Transcribe only text that is visible on the page.
 - Do not summarize, normalize away important formatting cues, or infer missing words.
 - If a word or number is unclear, preserve only the visible text rather than inventing content.
+- Each table cell value must appear in exactly one cell — do not repeat cell content outside the table.
 </grounding_rules>
 
 <verification_loop>
 Before finalizing:
-- Do a quick second pass for missed dates, times, bullets, headings, and footer or header text.
-- Check that the output is plain text only.
+- Confirm all tables are rendered as pipe tables, not as prose.
+- Do a second pass for missed dates, times, bullets, headings, and footer or header text.
 </verification_loop>
 """
 
@@ -239,7 +244,7 @@ def extract_analysis_sections(
     return sorted(sections, key=lambda section: (-section.priority_score, section.index))
 
 
-def segment_analysis_text(text: str, max_chars: int = 5000) -> list[AnalysisChunk]:
+def segment_analysis_text(text: str, max_chars: int = 20000) -> list[AnalysisChunk]:
     stripped = (text or "").strip()
     if not stripped:
         return []
@@ -290,7 +295,7 @@ def segment_analysis_text(text: str, max_chars: int = 5000) -> list[AnalysisChun
 def build_prioritized_chunks(
     body_text: str,
     attachments: Iterable[DownloadedAttachment],
-    max_chars: int = 5000,
+    max_chars: int = 20000,
     priority_terms: Iterable[str] | None = None,
 ) -> tuple[list[AnalysisSection], list[AnalysisChunk]]:
     sections = extract_analysis_sections(body_text, attachments, priority_terms=priority_terms)
@@ -309,6 +314,7 @@ def build_prioritized_chunks(
 
 
 def dedupe_extracted_events(events: Iterable[ExtractedEvent]) -> list[ExtractedEvent]:
+    # Phase 1: exact-key dedup (canonical_title, start_at, end_at)
     deduped: dict[tuple, ExtractedEvent] = {}
     for event in events:
         key = (
@@ -319,7 +325,47 @@ def dedupe_extracted_events(events: Iterable[ExtractedEvent]) -> list[ExtractedE
         existing = deduped.get(key)
         if existing is None or _event_score(event) > _event_score(existing):
             deduped[key] = event
+
+    # Phase 2: fuzzy title dedup within same (start_at, end_at) bucket
+    by_dates: dict[tuple[str, str], list[tuple]] = {}
+    for key in deduped:
+        date_key = (key[1], key[2])  # (start_at, end_at)
+        by_dates.setdefault(date_key, []).append(key)
+
+    drop_keys: set[tuple] = set()
+    for date_key, keys in by_dates.items():
+        if len(keys) < 2:
+            continue
+        for i in range(len(keys)):
+            if keys[i] in drop_keys:
+                continue
+            for j in range(i + 1, len(keys)):
+                if keys[j] in drop_keys:
+                    continue
+                if _titles_fuzzy_match(keys[i][0], keys[j][0]):
+                    # Keep the event with the higher score; drop the other
+                    ev_i, ev_j = deduped[keys[i]], deduped[keys[j]]
+                    if _event_score(ev_j) > _event_score(ev_i):
+                        drop_keys.add(keys[i])
+                    else:
+                        drop_keys.add(keys[j])
+
+    for key in drop_keys:
+        del deduped[key]
     return list(deduped.values())
+
+
+def _titles_fuzzy_match(title_a: str, title_b: str) -> bool:
+    """Return True if two canonical titles share ≥60% of their tokens."""
+    tokens_a = set(t for t in title_a.split() if len(t) > 1)
+    tokens_b = set(t for t in title_b.split() if len(t) > 1)
+    if not tokens_a or not tokens_b:
+        return False
+    shared = tokens_a & tokens_b
+    total = len(tokens_a) + len(tokens_b)
+    if total == 0:
+        return False
+    return (2 * len(shared) / total) >= 0.60
 
 
 def _canonical_event_title(value: str) -> str:
@@ -331,18 +377,114 @@ def _canonical_event_title(value: str) -> str:
     return normalized
 
 
+def _extract_pdf_text_with_pymupdf_tables(content: bytes) -> str:
+    """Extract PDF text with tables rendered as markdown pipe tables.
+
+    For each page, detected tables are extracted via PyMuPDF's find_tables()
+    and rendered as GitHub-flavored markdown. Non-table text blocks are
+    interleaved by vertical position so reading order is preserved.
+    Pages without tables fall back to standard get_text() extraction.
+    """
+    try:
+        import fitz
+    except ImportError:
+        return ""
+
+    pages: list[str] = []
+    try:
+        with fitz.open(stream=content, filetype="pdf") as doc:
+            for page_index in range(doc.page_count):
+                page = doc.load_page(page_index)
+                finder = page.find_tables()
+
+                if not finder.tables:
+                    page_text = page.get_text("text").strip()
+                    if page_text:
+                        pages.append(f"Page {page_index + 1}:\n{page_text}")
+                    continue
+
+                # Collect (y_position, content) pairs for reading-order assembly
+                parts: list[tuple[float, str]] = []
+
+                table_rects: list[fitz.Rect] = []
+                for table in finder.tables:
+                    rect = fitz.Rect(table.bbox)
+                    table_rects.append(rect)
+                    parts.append((rect.y0, table.to_markdown()))
+
+                # Add text blocks that don't overlap with any table region
+                for block in page.get_text("blocks"):
+                    bx0, by0, bx1, by1, block_text, *_ = block
+                    block_text = block_text.strip()
+                    if not block_text:
+                        continue
+                    block_rect = fitz.Rect(bx0, by0, bx1, by1)
+                    if not any(block_rect.intersects(tr) for tr in table_rects):
+                        parts.append((by0, block_text))
+
+                parts.sort(key=lambda p: p[0])
+                page_content = "\n\n".join(p[1] for p in parts)
+                if page_content:
+                    pages.append(f"Page {page_index + 1}:\n{page_content}")
+    except Exception:
+        pass
+
+    return "\n\n".join(pages).strip()
+
+
+def _pdf_is_image_heavy(content: bytes) -> bool:
+    """Returns True if any page has images covering more than 35% of its area.
+
+    Used to route scanned or poster-style PDFs to vision OCR where
+    text-layer extraction would yield nothing useful.
+    """
+    try:
+        import fitz
+    except ImportError:
+        return False
+    try:
+        with fitz.open(stream=content, filetype="pdf") as doc:
+            for page in doc:
+                page_area = page.rect.width * page.rect.height
+                if page_area > 0:
+                    image_area = sum(
+                        rect.width * rect.height
+                        for img in page.get_images(full=True)
+                        for rect in page.get_image_rects(img[0])
+                    )
+                    if image_area / page_area > 0.35:
+                        return True
+    except Exception:
+        pass
+    return False
+
+
 def maybe_extract_pdf_text(content: bytes) -> str:
     if not content:
         return ""
-    attempts = [
-        _extract_pdf_text_with_pymupdf,
+
+    # Primary: structured extraction via PyMuPDF with table-aware markdown output.
+    # Tables are rendered as pipe-delimited markdown preserving row/col relationships.
+    # Non-table PDFs fall through to standard text extraction on the same pass.
+    structured = _extract_pdf_text_with_pymupdf_tables(content)
+    if structured and _extracted_text_length(structured) >= MIN_EXTRACTED_TEXT_CHARS:
+        return structured
+
+    # For image-heavy pages (scans, poster-style) where text-layer yields nothing useful.
+    if _pdf_is_image_heavy(content):
+        ocr_text = _ocr_pdf_with_openai(content).strip()
+        if ocr_text:
+            return ocr_text
+
+    # Standard text-layer fallback chain for non-table, non-image-heavy PDFs.
+    text_layer_attempts = [
         _extract_pdf_text_with_pdfplumber,
         _extract_pdf_text_with_pypdf,
         _extract_pdf_text_with_pypdf2,
         _extract_pdf_text_with_pdftotext,
     ]
-    best_text = ""
-    for extractor in attempts:
+    best_text = structured or ""
+    for extractor in text_layer_attempts:
         try:
             extracted = extractor(content).strip()
         except Exception:
@@ -352,6 +494,7 @@ def maybe_extract_pdf_text(content: bytes) -> str:
         if len(extracted) > len(best_text):
             best_text = extracted
 
+    # Last resort: vision OCR for any remaining edge cases.
     ocr_text = _ocr_pdf_with_openai(content).strip()
     if len(ocr_text) > len(best_text):
         return ocr_text
@@ -541,8 +684,7 @@ def _sections_to_chunks(sections: Iterable[AnalysisSection], max_chars: int) -> 
 
     for section in sections:
         candidate = section.text if not current_text else f"{current_text}\n\n{section.text}"
-        same_tier = not current_sections or abs(current_sections[0].priority_score - section.priority_score) <= 20
-        if current_text and (len(candidate) > max_chars or not same_tier):
+        if current_text and len(candidate) > max_chars:
             flush()
         if len(section.text) > max_chars:
             lines = [line.strip() for line in section.text.splitlines() if line.strip()]

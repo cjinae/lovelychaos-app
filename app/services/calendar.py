@@ -84,6 +84,12 @@ class CalendarProvider:
     ) -> None:
         raise NotImplementedError
 
+    def list_calendars(self, access_token: str) -> list[dict]:
+        raise NotImplementedError
+
+    def create_calendar(self, access_token: str, name: str) -> dict:
+        raise NotImplementedError
+
 
 class MockCalendarProvider(CalendarProvider):
     def __init__(self) -> None:
@@ -148,6 +154,15 @@ class MockCalendarProvider(CalendarProvider):
         if self.fail_next:
             self.fail_next = False
             raise CalendarMutationError("mock reminder failure")
+
+    def list_calendars(self, access_token: str) -> list[dict]:
+        return [
+            {"id": "primary", "summary": "My Calendar", "primary": True},
+            {"id": "mock-school@group.calendar.google.com", "summary": "School Events", "primary": False},
+        ]
+
+    def create_calendar(self, access_token: str, name: str) -> dict:
+        return {"id": f"mock-{uuid.uuid4()}@group.calendar.google.com", "summary": name}
 
 
 class GoogleCalendarHttpProvider(CalendarProvider):
@@ -341,6 +356,34 @@ class GoogleCalendarHttpProvider(CalendarProvider):
                 response = client.patch(url, json=payload, headers=headers)
         if response.status_code >= 400:
             raise CalendarMutationError(f"google reminder update failed: {response.status_code}")
+
+
+    def list_calendars(self, access_token: str) -> list[dict]:
+        url = "https://www.googleapis.com/calendar/v3/users/me/calendarList"
+        headers = {"Authorization": f"Bearer {access_token}"}
+        with httpx.Client(timeout=self.timeout_sec) as client:
+            response = client.get(url, headers=headers)
+        if response.status_code >= 400:
+            raise CalendarMutationError(f"google calendar list failed: {response.status_code}")
+        items = response.json().get("items") or []
+        return [
+            {
+                "id": item.get("id", ""),
+                "summary": item.get("summary", ""),
+                "primary": bool(item.get("primary")),
+            }
+            for item in items
+        ]
+
+    def create_calendar(self, access_token: str, name: str) -> dict:
+        url = "https://www.googleapis.com/calendar/v3/calendars"
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        with httpx.Client(timeout=self.timeout_sec) as client:
+            response = client.post(url, json={"summary": name}, headers=headers)
+        if response.status_code >= 400:
+            raise CalendarMutationError(f"google calendar create failed: {response.status_code}")
+        body = response.json()
+        return {"id": body["id"], "summary": body.get("summary", name)}
 
 
 def _parse_google_event_time(payload: object) -> tuple[Optional[datetime], bool]:

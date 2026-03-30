@@ -1656,10 +1656,10 @@ def test_chunk_failure_still_processes_other_chunks(client, db_session, monkeypa
     payload["body_text"] = (
         "UPCOMING DATES\n"
         "Chunk 1\n"
-        + ("intro " * 1500)
+        + ("intro " * 4000)
         + "\n\nSwim schedule for Nolan on 2099-10-02 08:30.\n"
         "Chunk 2\n"
-        + ("details " * 1200)
+        + ("details " * 4000)
     )
     response = client.post("/webhooks/email/inbound", json=payload, headers={"x-signature": "local-dev-secret"})
     assert response.status_code == 200

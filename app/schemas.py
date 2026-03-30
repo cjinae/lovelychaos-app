@@ -102,8 +102,18 @@ class CalendarBindingOut(BaseModel):
     provider_user_email: str
     token_subject: str
     calendar_id: str
+    calendar_name: Optional[str] = None
     calendar_owner_email: str
     status: str
+
+
+class CalendarSelectIn(BaseModel):
+    calendar_id: str
+    calendar_name: str = ""
+
+
+class CalendarNewIn(BaseModel):
+    name: str
 
 
 class ReminderIn(BaseModel):

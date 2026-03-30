@@ -29,7 +29,7 @@ from app.services.priorities import canonicalize_priority_topic, priority_topic_
 logger = logging.getLogger(__name__)
 
 
-EXTRACTION_PROMPT_VERSION = "lovelychaos-extract-v7"
+EXTRACTION_PROMPT_VERSION = "lovelychaos-extract-v8"
 COMMAND_PROMPT_VERSION = "lovelychaos-command-v7"
 FORWARDED_INTENT_PROMPT_VERSION = "lovelychaos-forwarded-intent-v5"
 COMMAND_EXECUTION_PROMPT_VERSION = "lovelychaos-command-exec-v3"
@@ -37,6 +37,7 @@ EVENT_ROUTING_PROMPT_VERSION = "lovelychaos-route-v2"
 SUMMARY_EXTRACTION_PROMPT_VERSION = "lovelychaos-summary-extract-v9"
 SUMMARY_COMPRESSION_PROMPT_VERSION = "lovelychaos-summary-compress-v12"
 DOCUMENT_UNDERSTANDING_PROMPT_VERSION = "lovelychaos-document-understanding-v1"
+UNIFIED_EXTRACTION_PROMPT_VERSION = "lovelychaos-unified-extract-v1"
 MORE_INFO_PROMPT_VERSION = "lovelychaos-more-info-v1"
 PREFERENCE_PARSE_PROMPT_VERSION = "lovelychaos-preference-parse-v4"
 PREFERENCE_MATCH_PROMPT_VERSION = "lovelychaos-preference-match-v1"
@@ -67,6 +68,7 @@ Interpret imprecise wording like a careful human would, but never invent facts.
 - Include school-wide or general school events even when they may not be household-relevant.
 - If an event is mentioned but date, time, or details are missing or unclear, still return it with null fields where needed.
 - Treat newsletter lists, schedules, and repeated date blocks as coverage tasks: keep going until all distinct event candidates in the list are covered.
+- Deduplication: If the same real-world event appears multiple times in the document (e.g., mentioned in a header, body, and reminder section), emit it only once. Use the most complete/specific mention as the canonical record.
 </completeness_contract>
 
 <missing_context_gating>
@@ -76,9 +78,13 @@ Interpret imprecise wording like a careful human would, but never invent facts.
 - Normalize timestamps to ISO-8601 UTC when the date and time are supported by the provided context.
 </missing_context_gating>
 
+<metadata_boundary>
+Forwarded email header lines (`From:`, `Date:`, `Subject:`, `To:`) are email transport metadata — they are NOT school events and must never be emitted as event candidates. The forwarded subject line (e.g., `Subject: Information for the Week-March 22`) tells you when the newsletter was sent; it is not itself an event. The forwarded `Date:` line tells you the publication timestamp; it is not itself an event. Use these only to anchor dates and years for events extracted from the newsletter body or attachments.
+</metadata_boundary>
+
 <inference_rules>
 - When a newsletter or attachment clearly establishes the publication date or year in the subject, filename, or body, you may infer the same year for schedule entries that omit the year but belong to that same schedule block.
-- Treat forwarded original-email metadata as valid document context. If the forwarded email includes lines like `Date:` or `Subject:` that clearly establish the newsletter date or year, you may use that context for events extracted from linked or attached newsletter files.
+- Forwarded header metadata (`Date:`, `Subject:`) may be used only as a date/year anchor for resolving ambiguous dates in the newsletter body or attachments — never as a source of event candidates themselves.
 - If a `reference_datetime_hint` is provided, treat it as the canonical timestamp of the original message being discussed. Resolve relative phrases like `today`, `tomorrow`, `Thursday`, `this week`, or no-year dates against that timestamp, not against the current date.
 - For newsletter-style sections like `UPCOMING DATES`, infer the year from nearby document context when the month/day entries are clearly part of the same newsletter and no conflicting year is present.
 - If you infer a year from newsletter context, keep the event but lower confidence slightly and explain the inference in `model_reason`.
@@ -94,6 +100,8 @@ Interpret imprecise wording like a careful human would, but never invent facts.
 <verification_loop>
 Before finalizing:
 - Check that every distinct event candidate found in the email is represented or intentionally omitted because it is not an event.
+- Check that no event was emitted from forwarded header metadata (`From:`, `Date:`, `Subject:`, `To:` lines) — these are transport metadata, not events.
+- Check that no two events represent the same real-world occurrence (same date + same activity). If duplicates exist, keep only the most complete version.
 - Check that unsupported facts were not invented.
 - Check that uncertain values are null rather than guessed.
 - Check that the JSON still matches the schema exactly.
@@ -252,48 +260,192 @@ Before finalizing:
 </verification_loop>
 """
 
-DOCUMENT_UNDERSTANDING_SYSTEM_PROMPT = """You are LovelyChaos document understanding assistant.
+DOCUMENT_UNDERSTANDING_SYSTEM_PROMPT = """You are a school communication assistant for LovelyChaos. Read a school communication packet and produce a structured understanding of its contents. Your output directly shapes what parents see and what the system extracts downstream — accuracy and completeness are critical.
+
 <output_contract>
-- Return ONLY JSON. No prose outside JSON, no markdown fences, no comments, no extra keys.
-- Output must conform exactly to the provided schema.
+- Return ONLY valid JSON conforming exactly to the provided schema.
+- No prose, markdown fences, comments, or extra keys outside the schema.
+- Every required string field must be present. Use null only where the schema explicitly allows it.
 </output_contract>
 
-<task>
-Read the full school communication packet and explain what it is mainly about before downstream extraction and routing happen.
-</task>
-
 <grounding_rules>
-- Use only the supplied email subject, merged analysis text, forwarded metadata, household preferences, and any injected household/thread context.
-- Treat attached or extracted document text as first-party source material.
-- Do not invent dates, times, links, locations, or actions that are not supported by the packet.
-- If the packet is mainly a recap, resource share, or informational roundup, say that plainly.
+1. Use only the supplied email subject, merged analysis text, forwarded metadata, household preferences, and injected household/thread context.
+2. Treat attached or extracted document text as first-party source material.
+3. Do not invent dates, times, links, locations, or actions not present in the packet.
+4. If the packet is a recap, resource share, or informational roundup, classify it as such — do not inflate its actionability.
+5. Do not omit, filter, or suppress topics based on household preference settings or suppressed_priority_topics. Include all significant topics from the packet regardless of whether they match or conflict with stated preferences. Preference relevance is evaluated separately downstream — your job is to surface what is in the document, not to pre-filter it.
 </grounding_rules>
 
 <classification_rules>
-- `document_kind` describes the communication format or purpose: `newsletter`, `reminder`, `recap`, `resource_share`, `signup`, `permission`, `mixed`, or `unknown`.
-- `overall_intent` describes whether the parent mainly needs to act: `actionable`, `informational`, or `mixed`.
-- `assistant_summary` should be 2 to 4 short sentences in plain language.
-- `assistant_intro` should be 1 to 2 concise sentences suitable for the opening of the recap email.
-- `actionable_topics` should include only grounded candidate topics that look like they may require follow-up or later action.
-- `informational_topics` should include grounded topics worth remembering or explaining later even if they are not actionable.
-- Use `routing_hints.recap_like` when the packet mostly looks backward-looking, feedback-oriented, or like a resource share.
-- Use `routing_hints.resource_share_like` when the packet mainly shares links, slides, handouts, or at-home resources.
-- Use `routing_hints.contains_calendar_relevant_items` only when the packet clearly contains at least one schedule-oriented item that could matter downstream.
+**document_kind** — the communication format or purpose:
+- `newsletter`: regular school update covering multiple topics
+- `reminder`: single-purpose deadline or date nudge
+- `recap`: backward-looking summary or feedback
+- `resource_share`: primarily links, handouts, or at-home materials
+- `signup`: registration or permission form
+- `permission`: consent or acknowledgment request
+- `mixed`: clearly spans two or more of the above
+- `unknown`: cannot be determined
+
+**overall_intent** — whether the parent mainly needs to act:
+- `actionable`: one or more items require parent follow-up
+- `informational`: awareness only, no action needed
+- `mixed`: contains both
+
+**assistant_summary** — 2 to 4 short sentences in plain parent-facing language summarizing what the packet is mainly about.
+
+**assistant_intro** — 1 to 2 concise sentences suitable as the opening line of the recap email sent to the parent.
+
+**actionable_topics** — topics that require or invite parent follow-up (registration, permission, RSVP, purchase, etc.). Include only grounded candidates.
+
+**informational_topics** — topics worth noting or explaining later even if no action is needed (upcoming events, awareness items, school news).
+
+**routing_hints:**
+- Set `recap_like: true` when the packet is mostly backward-looking or feedback-oriented.
+- Set `resource_share_like: true` when the packet mainly shares links, slides, or at-home resources.
+- Set `contains_calendar_relevant_items: true` when the packet contains at least one date or schedule item that could matter downstream.
+
+**scope_hint** — how broadly a topic applies. Assign to every topic entry:
+- `household_specific`: tied to a named child, their specific class, or their named teacher (e.g. "Emma's photo retake", "Ms. Chen's class trip")
+- `grade_specific`: explicitly targets a grade range, age group, or named student cohort (e.g. "Grades 3–8 basketball program", "Grade 5 Girls Volleyball Tournament", "JK/SK families")
+- `school_global`: applies equally to all students and families regardless of grade (e.g. "School Council meeting", "PA Day")
+- `unknown`: scope genuinely cannot be determined from the packet
 </classification_rules>
 
+<topic_completeness_contract>
+Before writing actionable_topics and informational_topics, scan the full packet for every distinct event, program, deadline, and news item. Then:
+1. Give each significant event, program, or deadline its own topic entry — do not bundle unrelated items together.
+2. Exception: recurring standing items with the same purpose may be grouped (e.g. "Pizza Lunches on April 1, 15, 29").
+3. Populate `timing_hint` with the specific date or date range whenever the packet provides one.
+4. Confirm every topic is grounded in the packet before finalizing.
+</topic_completeness_contract>
+
 <style_rules>
-- Sound like a helpful assistant, not a parser.
-- Keep summaries compact and parent-facing.
+- Write for parents, not for the system. Sound like a helpful assistant, not a parser.
+- Keep `assistant_summary` and `why_it_matters` compact — one clear sentence each for `why_it_matters`.
 - Prefer paraphrase over copied source wording.
-- Topic titles should be short and identifiable.
-- `why_it_matters` should explain the point of the topic in one short sentence.
+- Topic titles should be short and identifiable (5–8 words).
+- `action_hint` should name the specific action, not a generic "check the school website."
+</style_rules>
+
+<verification_loop>
+Before returning output, confirm each item:
+- [ ] Every factual claim (date, grade, location, name) is grounded in the packet.
+- [ ] No distinct calendar event or program has been merged into a catch-all topic.
+- [ ] Every topic has the correct scope_hint — grade-specific programs are not marked school_global.
+- [ ] recap_like and resource_share_like are not set true for action-heavy packets.
+- [ ] The JSON matches the schema exactly — no missing required fields, no extra keys.
+- [ ] No topics have been omitted because they conflict with household preferences or suppressed_priority_topics.
+</verification_loop>
+"""
+
+UNIFIED_EXTRACTION_SYSTEM_PROMPT = """You are LovelyChaos unified extraction engine. You read school communications once and produce a complete structured analysis: both the high-level document understanding and every individual event or topic.
+
+<output_contract>
+- Return ONLY JSON. No prose, no markdown, no code fences, no comments, no extra keys.
+- Output must conform exactly to the provided schema.
+- `events` must contain one object per distinct event candidate.
+- `informational_items` must contain non-calendar topics worth surfacing to parents.
+- If no event candidates are present, return an empty `events` list.
+</output_contract>
+
+<task>
+Read the full school communication packet (email body, forwarded content, and any attached/extracted document text). Produce:
+1. A document-level understanding (kind, intent, summary, scope, routing hints).
+2. Every distinct calendar-relevant event as a structured event object.
+3. Every distinct non-calendar topic as an informational item.
+</task>
+
+<grounding_rules>
+1. Use only the supplied email subject, analysis text, forwarded metadata, household preferences, and any injected household/thread context.
+2. Treat attached or extracted document text as first-party source material.
+3. Do not invent dates, times, links, locations, or actions not present in the packet.
+4. If a statement is inferred rather than explicit, lower confidence and explain the inference briefly in `model_reason`.
+5. Do not omit, filter, or suppress topics based on household preference settings or suppressed_priority_topics. Include all significant topics regardless of whether they match or conflict with stated preferences. Preference relevance is evaluated separately downstream.
+</grounding_rules>
+
+<classification_rules>
+**document_kind** — the communication format or purpose:
+- `newsletter`: regular school update covering multiple topics
+- `reminder`: single-purpose deadline or date nudge
+- `recap`: backward-looking summary or feedback
+- `resource_share`: primarily links, handouts, or at-home materials
+- `signup`: registration or permission form
+- `permission`: consent or acknowledgment request
+- `mixed`: clearly spans two or more of the above
+- `unknown`: cannot be determined
+
+**overall_intent** — whether the parent mainly needs to act:
+- `actionable`: one or more items require parent follow-up
+- `informational`: awareness only, no action needed
+- `mixed`: contains both
+
+**scope_hint** — how broadly a topic or event applies:
+- `household_specific`: tied to a named child, their specific class, or their named teacher
+- `grade_specific`: explicitly targets a grade range, age group, or named student cohort
+- `school_global`: applies equally to all students and families regardless of grade
+- `unknown`: scope genuinely cannot be determined
+
+**assistant_summary** — 2 to 4 short sentences in plain parent-facing language summarizing what the packet is mainly about.
+
+**assistant_intro** — 1 to 2 concise sentences suitable as the opening line of the recap email sent to the parent.
+</classification_rules>
+
+<event_extraction_rules>
+- Extract every distinct calendar-relevant event (dates, deadlines, closures, activities, programs with scheduled times).
+- Each event gets its own object. Do not merge separate events.
+- Include school-wide or general school events even when they may not be household-relevant.
+- If an event is mentioned but date, time, or details are missing or unclear, still return it with null fields.
+- Treat newsletter lists, schedules, and repeated date blocks as coverage tasks: extract every distinct event candidate.
+- For date-only closures, holidays, PA Days, or all-day items, keep as date-only facts — do not invent time windows.
+- `preference_match` should reflect relevance to household preferences, but must not control whether the event is emitted.
+- Do not use household preferences as a filter for whether to emit an event.
+- Normalize timestamps to ISO-8601 UTC when date and time are supported by the context.
+</event_extraction_rules>
+
+<informational_item_rules>
+- Extract non-calendar topics that are worth surfacing: awareness items, school news, program announcements, community info, resource shares.
+- Each distinct topic gets its own item. Do not bundle unrelated items.
+- Exception: recurring standing items with the same purpose may be grouped.
+- Populate `timing_hint` with specific dates when provided.
+- Write `why_it_matters` as one clear sentence for parents.
+- Topic titles should be short and identifiable (5–8 words).
+</informational_item_rules>
+
+<metadata_boundary>
+Forwarded email header lines (`From:`, `Date:`, `Subject:`, `To:`) are email transport metadata — NOT school events and must never be emitted as event candidates. Use these only to anchor dates and years for events in the body or attachments.
+</metadata_boundary>
+
+<inference_rules>
+- When a newsletter clearly establishes the publication date or year, infer the same year for schedule entries that omit the year but belong to the same block.
+- Forwarded header metadata may be used only as a date/year anchor — never as a source of event candidates.
+- If a `reference_datetime_hint` is provided, resolve relative phrases (`today`, `tomorrow`, `Thursday`, `this week`) against it, not against the current date.
+- If you infer a year from context, lower confidence slightly and explain in `model_reason`.
+</inference_rules>
+
+<deduplication_rules>
+- Each real-world event or topic must appear exactly once in the output.
+- If the same event appears in a header, body, and reminder section, emit it only once using the most complete mention.
+- An item should be either an event OR an informational item, not both. Calendar-relevant items with dates go in events; undated awareness items go in informational_items.
+</deduplication_rules>
+
+<style_rules>
+- Write for parents, not for the system. Sound like a helpful assistant, not a parser.
+- Keep `assistant_summary` and `why_it_matters` compact.
+- Keep `model_reason` and `email_level_notes` concise; use null when nothing noteworthy.
 </style_rules>
 
 <verification_loop>
 Before finalizing:
-- Check that every factual claim is grounded in the supplied packet.
-- Check that recap/resource-share packets are not misrepresented as action-heavy.
-- Check that the JSON still matches the schema exactly.
+- [ ] Every distinct event candidate in the packet is represented in `events`.
+- [ ] Every distinct non-calendar topic is represented in `informational_items`.
+- [ ] No item appears in both `events` and `informational_items`.
+- [ ] No two events represent the same real-world occurrence (same date + same activity).
+- [ ] No event was emitted from forwarded header metadata (`From:`, `Date:`, `Subject:`, `To:` lines).
+- [ ] No topics have been omitted because they conflict with household preferences.
+- [ ] Every factual claim is grounded in the packet.
+- [ ] Uncertain values are null rather than guessed.
+- [ ] The JSON matches the schema exactly.
 </verification_loop>
 """
 
@@ -455,6 +607,13 @@ The result must be concise, high-signal, and optimized for a fast email or SMS-s
 - Exclude any item that explicitly mentions a grade (e.g. "Grade 5 swim meet", "Grade 3-5 trip") when none of the household's children are enrolled in that grade. Items without an explicit grade qualifier always pass through.
 - Exclude any item that clearly matches a suppressed household preference topic. Do not include suppressed topics even if they have a concrete date.
 </filtering_rules>
+
+<deduplication_rules>
+1. Each real-world event or topic must appear exactly once in the output.
+2. If two items describe the same occurrence (same date + similar activity, or same topic with different phrasing), merge them into the more informative version — do not list both.
+3. Date-prefixed items (e.g., "Apr 3: Pizza Lunch") and undated items (e.g., "Pizza Lunch") referring to the same event must be merged; keep the dated version.
+4. Do not split a single event into a date-line and a description-line — keep them together.
+</deduplication_rules>
 
 <verification_loop>
 Before finalizing:
@@ -1110,6 +1269,27 @@ class DocumentUnderstandingOutput(_StrictOutputModel):
     notes: list[str]
 
 
+class InformationalItemOutput(_StrictOutputModel):
+    title: str
+    why_it_matters: str
+    action_hint: str | None = None
+    timing_hint: str | None = None
+    scope_hint: Literal["household_specific", "grade_specific", "school_global", "unknown"]
+
+
+class UnifiedExtractionOutput(_StrictOutputModel):
+    document_kind: Literal["newsletter", "reminder", "recap", "resource_share", "signup", "permission", "mixed", "unknown"]
+    overall_intent: Literal["actionable", "informational", "mixed"]
+    scope_hint: Literal["household_specific", "grade_specific", "school_global", "unknown"]
+    assistant_summary: str
+    assistant_intro: str
+    events: list[ExtractedEventOutput]
+    informational_items: list[InformationalItemOutput]
+    routing_hints: DocumentRoutingHintsOutput
+    email_level_notes: str | None = None
+    notes: list[str]
+
+
 _DOWNSTREAM_DOCUMENT_TOPIC_LIMIT = 4
 _DOWNSTREAM_DOCUMENT_NOTE_LIMIT = 3
 _DOWNSTREAM_DOCUMENT_SUMMARY_MAX_CHARS = 320
@@ -1254,6 +1434,20 @@ class DecisionEngine:
         raise NotImplementedError
 
     def understand_document(
+        self,
+        *,
+        analysis_text: str,
+        subject: str,
+        household_preferences: str = "",
+        timezone_hint: str = "UTC",
+        reference_datetime_hint: str = "",
+        forwarded_subject: str = "",
+        forwarded_sender: str = "",
+        forwarded_date: str = "",
+    ) -> dict:
+        raise NotImplementedError
+
+    def unified_extract(
         self,
         *,
         analysis_text: str,
@@ -1761,6 +1955,43 @@ class MockDecisionEngine(DecisionEngine):
             "notes": [f"timezone_hint={timezone_hint}"] if timezone_hint else [],
         }
 
+    def unified_extract(
+        self,
+        *,
+        analysis_text: str,
+        subject: str,
+        household_preferences: str = "",
+        timezone_hint: str = "UTC",
+        reference_datetime_hint: str = "",
+        forwarded_subject: str = "",
+        forwarded_sender: str = "",
+        forwarded_date: str = "",
+    ) -> dict:
+        # Combine understand_document + extract_events for fast-path mock
+        doc_understanding = self.understand_document(
+            analysis_text=analysis_text,
+            subject=subject,
+            household_preferences=household_preferences,
+            timezone_hint=timezone_hint,
+            reference_datetime_hint=reference_datetime_hint,
+            forwarded_subject=forwarded_subject,
+            forwarded_sender=forwarded_sender,
+            forwarded_date=forwarded_date,
+        )
+        extraction = self.extract_events(
+            body_text=analysis_text,
+            subject=subject,
+            household_preferences=household_preferences,
+            timezone_hint=timezone_hint,
+            reference_datetime_hint=reference_datetime_hint,
+            document_understanding=doc_understanding,
+        )
+        return {
+            "events": extraction["events"],
+            "email_level_notes": extraction.get("email_level_notes"),
+            "document_understanding": doc_understanding,
+        }
+
     def parse_command(self, body_text: str) -> dict:
         txt = body_text.lower()
         action = "none"
@@ -2080,6 +2311,7 @@ class MockDecisionEngine(DecisionEngine):
                 "summary_extract": SUMMARY_EXTRACTION_PROMPT_VERSION,
                 "summary_compress": SUMMARY_COMPRESSION_PROMPT_VERSION,
                 "document_understanding": DOCUMENT_UNDERSTANDING_PROMPT_VERSION,
+                "unified_extraction": UNIFIED_EXTRACTION_PROMPT_VERSION,
                 "more_info": MORE_INFO_PROMPT_VERSION,
                 "preference_parse": PREFERENCE_PARSE_PROMPT_VERSION,
                 "preference_match": PREFERENCE_MATCH_PROMPT_VERSION,
@@ -2480,6 +2712,111 @@ class OpenAIDecisionEngine(MockDecisionEngine):
         )
         return parsed.model_dump(mode="json")
 
+    def unified_extract(
+        self,
+        *,
+        analysis_text: str,
+        subject: str,
+        household_preferences: str = "",
+        timezone_hint: str = "UTC",
+        reference_datetime_hint: str = "",
+        forwarded_subject: str = "",
+        forwarded_sender: str = "",
+        forwarded_date: str = "",
+    ) -> dict:
+        user_payload = (
+            "household_preferences:\n"
+            f"{household_preferences or ''}\n\n"
+            "email_subject:\n"
+            f"{subject}\n\n"
+            "analysis_text:\n"
+            f"{analysis_text}\n\n"
+            "timezone_hint:\n"
+            f"{timezone_hint}\n\n"
+            "reference_datetime_hint:\n"
+            f"{reference_datetime_hint or ''}\n\n"
+            "forwarded_subject:\n"
+            f"{forwarded_subject}\n\n"
+            "forwarded_sender:\n"
+            f"{forwarded_sender}\n\n"
+            "forwarded_date:\n"
+            f"{forwarded_date}\n"
+        )
+        parsed = self._run_agent(
+            agent_name="unified_extraction",
+            system_prompt=UNIFIED_EXTRACTION_SYSTEM_PROMPT,
+            user_payload=user_payload,
+            output_type=UnifiedExtractionOutput,
+            prompt_version=UNIFIED_EXTRACTION_PROMPT_VERSION,
+            use_session=False,
+            inject_conversation_context=True,
+        )
+        # Convert event outputs to ExtractedEvent dataclass instances (same as extract_events)
+        events: list[ExtractedEvent] = []
+        for item in parsed.events:
+            start_raw = (item.start_at or "").strip()
+            end_raw = (item.end_at or "").strip()
+            start = self._parse_iso_or_none(start_raw, timezone_hint=timezone_hint)
+            end = self._parse_iso_or_none(end_raw, timezone_hint=timezone_hint)
+            if start and not end:
+                end = (
+                    self._next_local_day_boundary(start, timezone_hint=timezone_hint)
+                    if self._looks_like_date_only_value(start_raw)
+                    else start + timedelta(hours=1)
+                )
+            if start and end and end <= start:
+                end = (
+                    self._next_local_day_boundary(start, timezone_hint=timezone_hint)
+                    if self._looks_like_date_only_value(start_raw) or self._looks_like_date_only_value(end_raw)
+                    else start + timedelta(hours=1)
+                )
+            events.append(
+                ExtractedEvent(
+                    title=(item.title or subject or "School Update").strip(),
+                    start_at=start,
+                    end_at=end,
+                    category=(item.category or "general").strip() or "general",
+                    confidence=float(item.confidence or 0.0),
+                    target_scope=(item.target_scope or "unknown"),
+                    mentioned_names=list(item.mentioned_names or []),
+                    mentioned_schools=list(item.mentioned_schools or []),
+                    target_grades=list(item.target_grades or []),
+                    preference_match=bool(item.preference_match),
+                    model_reason=(item.model_reason or ""),
+                )
+            )
+        # Convert informational items to document_understanding-compatible topic dicts
+        actionable_topics = []
+        informational_topics = []
+        for item in parsed.informational_items:
+            topic = {
+                "title": item.title,
+                "why_it_matters": item.why_it_matters,
+                "action_hint": item.action_hint,
+                "timing_hint": item.timing_hint,
+                "scope_hint": item.scope_hint,
+            }
+            if item.action_hint:
+                actionable_topics.append(topic)
+            else:
+                informational_topics.append(topic)
+        document_understanding = {
+            "document_kind": parsed.document_kind,
+            "overall_intent": parsed.overall_intent,
+            "scope_hint": parsed.scope_hint,
+            "assistant_summary": parsed.assistant_summary,
+            "assistant_intro": parsed.assistant_intro,
+            "actionable_topics": actionable_topics,
+            "informational_topics": informational_topics,
+            "routing_hints": parsed.routing_hints.model_dump(mode="json"),
+            "notes": list(parsed.notes or []),
+        }
+        return {
+            "events": events,
+            "email_level_notes": parsed.email_level_notes if events else "empty_model_events",
+            "document_understanding": document_understanding,
+        }
+
     def parse_command(self, body_text: str) -> dict:
         user_payload = f"message_body:\n{body_text}\n"
         parsed = self._run_agent(
@@ -2776,6 +3113,7 @@ class OpenAIDecisionEngine(MockDecisionEngine):
                 "summary_extract": SUMMARY_EXTRACTION_PROMPT_VERSION,
                 "summary_compress": SUMMARY_COMPRESSION_PROMPT_VERSION,
                 "document_understanding": DOCUMENT_UNDERSTANDING_PROMPT_VERSION,
+                "unified_extraction": UNIFIED_EXTRACTION_PROMPT_VERSION,
                 "more_info": MORE_INFO_PROMPT_VERSION,
                 "preference_parse": PREFERENCE_PARSE_PROMPT_VERSION,
             },

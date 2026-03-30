@@ -61,6 +61,8 @@ from app.schemas import (
     OperationResponse,
     CalendarBindingIn,
     CalendarBindingOut,
+    CalendarNewIn,
+    CalendarSelectIn,
     HouseholdProfileIn,
     HouseholdProfileOut,
     InboundSMSRequest,
@@ -1727,6 +1729,13 @@ def _normalized_sender_identity(value: str) -> tuple[str, str]:
     return "", fallback
 
 
+_GRADE_ANNOTATIONS = {"JK": "JK (Junior Kindergarten)", "SK": "SK (Senior Kindergarten)"}
+
+
+def _annotate_grade(grade: str) -> str:
+    return _GRADE_ANNOTATIONS.get(grade.upper(), grade)
+
+
 def _serialize_teacher_contacts(child: Child) -> list[dict]:
     contacts = []
     for contact in list(child.teacher_contacts or []):
@@ -1837,7 +1846,7 @@ def _build_agent_household_context(
                 "id": child.id,
                 "name": str(child.name or ""),
                 "school_name": str(child.school_name or ""),
-                "grade": str(child.grade or ""),
+                "grade": _annotate_grade(str(child.grade or "")),
                 "status": str(child.status or ""),
                 "teacher_contacts": _serialize_teacher_contacts(child),
             }
@@ -1846,16 +1855,11 @@ def _build_agent_household_context(
         "preferences": {
             "raw_text": str(preference_payload.get("raw_text") or ""),
             "system_defaults": list(preference_payload.get("system_defaults") or []),
-            "preset_priority_topics": list(preference_payload.get("preset_priority_topics") or []),
-            "parsed_priority_topics": list(preference_payload.get("parsed_priority_topics") or []),
-            "suppressed_priority_topics": list(preference_payload.get("suppressed_priority_topics") or []),
             "user_priority_topics": list(preference_payload.get("user_priority_topics") or []),
             "effective_suppressed_priority_topics": list(
                 preference_payload.get("effective_suppressed_priority_topics") or []
             ),
             "command_written_preferences": list(preference_payload.get("command_written_preferences") or []),
-            "preference_parse_status": str(preference_payload.get("preference_parse_status") or ""),
-            "preference_parse_error": str(preference_payload.get("preference_parse_error") or ""),
         },
     }
 
@@ -3232,9 +3236,21 @@ def _document_understanding_priority_terms(document_understanding: dict | None) 
     return terms
 
 
-def _document_topics_to_followup_items(document_understanding: dict | None, *, source_message_id: int) -> list[dict]:
+def _topic_label_matches(topic_label: str, *text_values: str) -> bool:
+    return topic_matches_text(topic_label, *text_values)
+
+
+def _document_topics_to_followup_items(
+    document_understanding: dict | None,
+    *,
+    source_message_id: int,
+    user_priority_topics: list[str] | None = None,
+    suppressed_priority_topics: list[str] | None = None,
+) -> list[dict]:
     if not isinstance(document_understanding, dict):
         return []
+    positive_topics = list(user_priority_topics or [])
+    suppressed_topics = list(suppressed_priority_topics or [])
     items: list[dict] = []
     for bucket_name, default_can_add in (("actionable_topics", False), ("informational_topics", False)):
         for idx, topic in enumerate(list(document_understanding.get(bucket_name) or []), start=1):
@@ -3252,6 +3268,8 @@ def _document_topics_to_followup_items(document_understanding: dict | None, *, s
             text = title
             if detail:
                 text = f"{title}: {detail}"
+            matched_user = [t for t in positive_topics if _topic_label_matches(t, title, detail)]
+            matched_suppressed = [t for t in suppressed_topics if _topic_label_matches(t, title, detail)]
             items.append(
                 {
                     "item_id": f"msg-{source_message_id}-{bucket_name}-{idx}",
@@ -3271,6 +3289,9 @@ def _document_topics_to_followup_items(document_understanding: dict | None, *, s
                     "timing_hint": timing_hint or None,
                     "scope_hint": str(topic.get("scope_hint") or "unknown"),
                     "applies_to": [],
+                    "matched_user_priorities": matched_user,
+                    "suppressed_match": bool(matched_suppressed),
+                    "matched_suppressed_topics": matched_suppressed,
                     "action_capabilities": {
                         "can_add": default_can_add,
                         "can_explain": True,
@@ -4418,63 +4439,111 @@ def inbound_email(
     if not analysis_text:
         analysis_text = content_body_text
     reference_datetime_hint = _serialize_dt(_parse_forwarded_reference_datetime(email_intent.forwarded_date, user.timezone)) or ""
-    document_understanding = None
-    with _conversation_runtime_scope(
-        source=source,
-        thread_documents=thread_documents,
-        household_context=agent_household_context,
-    ):
-        try:
-            document_understanding = engine_llm.understand_document(
-                analysis_text=analysis_text,
-                subject=payload.subject,
-                household_preferences=preference_text,
-                timezone_hint=user.timezone,
-                reference_datetime_hint=reference_datetime_hint,
-                forwarded_subject=email_intent.forwarded_subject,
-                forwarded_sender=email_intent.forwarded_sender,
-                forwarded_date=email_intent.forwarded_date,
-            )
-        except Exception:
-            document_understanding = None
-    sections, prioritized_chunks = build_prioritized_chunks(
-        content_body_text,
-        analysis_attachments,
-        priority_terms=_document_understanding_priority_terms(document_understanding),
+
+    # Complexity routing: fast path (unified extraction) vs thorough path (multi-pass)
+    use_fast_path = (
+        hasattr(engine_llm, "unified_extract")
+        and len(analysis_text) <= getattr(settings, "unified_extraction_char_limit", 30000)
+        and len(analysis_attachments) <= getattr(settings, "unified_extraction_max_attachments", 1)
     )
-    section_summaries = [
-        {
-            "section_index": section.index,
-            "label": section.label,
-            "section_kind": section.section_kind,
-            "priority_score": section.priority_score,
-            "source_kind": section.source_kind,
-            "char_count": len(section.text),
-        }
-        for section in sections
-    ]
+
+    document_understanding = None
+    extracted_events: list = []
+    sections: list = []
+    chunk_summaries: list = []
+    chunk_notes: list[str] = []
+    chunk_failures: list = []
+    section_summaries: list = []
+    used_unified_extraction = False
+
+    if use_fast_path:
+        # Fast path: single LLM call replaces understand_document + chunking + extract_events
+        with _conversation_runtime_scope(
+            source=source,
+            thread_documents=thread_documents,
+            household_context=agent_household_context,
+        ):
+            try:
+                unified_result = engine_llm.unified_extract(
+                    analysis_text=analysis_text,
+                    subject=payload.subject,
+                    household_preferences=preference_text,
+                    timezone_hint=user.timezone,
+                    reference_datetime_hint=reference_datetime_hint,
+                    forwarded_subject=email_intent.forwarded_subject,
+                    forwarded_sender=email_intent.forwarded_sender,
+                    forwarded_date=email_intent.forwarded_date,
+                )
+                extracted_events = unified_result["events"]
+                document_understanding = unified_result["document_understanding"]
+                chunk_notes = [unified_result["email_level_notes"]] if unified_result.get("email_level_notes") else []
+                used_unified_extraction = True
+            except Exception:
+                # Fall back to thorough path on failure
+                use_fast_path = False
+
+    if not use_fast_path:
+        # Thorough path: separate understand_document + chunked extraction
+        with _conversation_runtime_scope(
+            source=source,
+            thread_documents=thread_documents,
+            household_context=agent_household_context,
+        ):
+            try:
+                document_understanding = engine_llm.understand_document(
+                    analysis_text=analysis_text,
+                    subject=payload.subject,
+                    household_preferences=preference_text,
+                    timezone_hint=user.timezone,
+                    reference_datetime_hint=reference_datetime_hint,
+                    forwarded_subject=email_intent.forwarded_subject,
+                    forwarded_sender=email_intent.forwarded_sender,
+                    forwarded_date=email_intent.forwarded_date,
+                )
+            except Exception:
+                document_understanding = None
+        sections, prioritized_chunks = build_prioritized_chunks(
+            content_body_text,
+            analysis_attachments,
+            priority_terms=_document_understanding_priority_terms(document_understanding),
+        )
+        section_summaries = [
+            {
+                "section_index": section.index,
+                "label": section.label,
+                "section_kind": section.section_kind,
+                "priority_score": section.priority_score,
+                "source_kind": section.source_kind,
+                "char_count": len(section.text),
+            }
+            for section in sections
+        ]
 
     sender_email_hint, sender_name_hint = _normalized_sender_identity(email_intent.forwarded_sender or payload.sender)
     _append_user_turn_to_session(db, source)
     db.commit()
-    with _conversation_runtime_scope(
-        source=source,
-        thread_documents=thread_documents,
-        household_context=agent_household_context,
-    ):
-        extracted_events, chunk_summaries, chunk_notes, chunk_failures = _collect_extraction_results(
-            prioritized_chunks,
-            payload.subject,
-            preference_text,
-            user.timezone,
-            reference_datetime_hint=reference_datetime_hint,
-            document_understanding=document_understanding,
-        )
+
+    if not use_fast_path:
+        with _conversation_runtime_scope(
+            source=source,
+            thread_documents=thread_documents,
+            household_context=agent_household_context,
+        ):
+            extracted_events, chunk_summaries, chunk_notes, chunk_failures = _collect_extraction_results(
+                prioritized_chunks,
+                payload.subject,
+                preference_text,
+                user.timezone,
+                reference_datetime_hint=reference_datetime_hint,
+                document_understanding=document_understanding,
+            )
+
     analysis_audit = {
         "links": candidate_links,
         "link_attempts": [attempt.__dict__ for attempt in link_report.attempts],
         "attachment_count": len(analysis_attachments),
         "analysis_char_count": len(analysis_text),
+        "extraction_path": "unified" if used_unified_extraction else "thorough",
         "document_understanding": document_understanding,
         "section_summaries": section_summaries,
         "chunk_summaries": chunk_summaries,
@@ -4503,6 +4572,7 @@ def inbound_email(
                 informational_only=None,
                 reference_datetime_hint=reference_datetime_hint,
                 document_understanding=document_understanding,
+                skip_candidate_extraction=used_unified_extraction,
             )
         if _summary_has_content(summary_result):
             validator_issues = ["empty_extraction_informational_fallback"]
@@ -4527,6 +4597,8 @@ def inbound_email(
             document_followup_items = _document_topics_to_followup_items(
                 document_understanding,
                 source_message_id=source.id,
+                user_priority_topics=list(priority_preferences["user_priority_topics"]),
+                suppressed_priority_topics=list(priority_preferences["effective_suppressed_priority_topics"]),
             )
             persist_followup_context(
                 db,
@@ -4813,6 +4885,7 @@ def inbound_email(
             informational_only=outcome_counts["followup_available"] == 0 and outcome_counts["event_created"] == 0,
             reference_datetime_hint=reference_datetime_hint,
             document_understanding=document_understanding,
+            skip_candidate_extraction=used_unified_extraction,
         )
     response_channel = resolve_response_channel(
         origin_channel="email",
@@ -4828,6 +4901,8 @@ def inbound_email(
         _document_topics_to_followup_items(
             document_understanding,
             source_message_id=source.id,
+            user_priority_topics=list(priority_preferences["user_priority_topics"]),
+            suppressed_priority_topics=list(priority_preferences["effective_suppressed_priority_topics"]),
         )
     )
     summary_items_shown = _followup_summary_items(summary_result, actionable_items)
@@ -5929,15 +6004,21 @@ def auth_google_callback(code: str, state: str, db: Session = Depends(get_db)):
         binding = CalendarBinding(
             household_id=household_id,
             google_credential_id=credential.id,
-            calendar_id="primary",
+            calendar_id="",
             calendar_owner_email=email,
             status="active",
         )
         db.add(binding)
     binding.google_credential_id = credential.id
-    binding.calendar_id = binding.calendar_id or "primary"
+    # Preserve existing calendar_id — user selects calendar in onboarding/admin
     binding.calendar_owner_email = email
     binding.status = "active"
+
+    admin_user = db.scalar(
+        select(User).where(User.household_id == household_id, User.is_admin.is_(True)).order_by(User.id.asc())
+    )
+    if admin_user:
+        admin_user.email = email
 
     db.commit()
     next_url = payload.get("next_url")
@@ -6207,6 +6288,7 @@ def admin_get_calendar_binding(db: Session = Depends(get_db)):
         provider_user_email=credential.provider_user_email,
         token_subject=credential.token_subject,
         calendar_id=binding.calendar_id,
+        calendar_name=binding.calendar_name,
         calendar_owner_email=binding.calendar_owner_email,
         status=binding.status,
     )
@@ -6240,6 +6322,86 @@ def admin_put_calendar_binding(payload: CalendarBindingIn, db: Session = Depends
     binding.status = "active"
     db.commit()
     return {"ok": True}
+
+
+@app.get("/admin/calendar-list")
+def admin_get_calendar_list(db: Session = Depends(get_db)):
+    credential = db.scalar(
+        select(GoogleCredential).where(
+            GoogleCredential.household_id == 1,
+            GoogleCredential.status == "active",
+        )
+    )
+    if not credential:
+        raise HTTPException(status_code=404, detail="No Google credential found")
+    if getattr(settings, "google_calendar_mode", "live") == "live" and should_refresh_token(credential.token_expiry):
+        if not credential.refresh_token:
+            raise HTTPException(status_code=400, detail="Credential expired and no refresh token")
+        try:
+            new_access_token, new_expiry = refresh_google_access_token(
+                refresh_token=credential.refresh_token,
+                client_id=settings.google_client_id,
+                client_secret=settings.google_client_secret,
+                timeout_sec=settings.google_calendar_timeout_sec,
+            )
+            credential.access_token = new_access_token
+            credential.token_expiry = new_expiry
+            db.commit()
+        except GoogleAuthError as exc:
+            raise HTTPException(status_code=400, detail=f"Token refresh failed: {exc}") from exc
+    try:
+        return calendar_provider.list_calendars(credential.access_token)
+    except CalendarMutationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.put("/admin/calendar-select")
+def admin_put_calendar_select(payload: CalendarSelectIn, db: Session = Depends(get_db)):
+    binding = db.scalar(select(CalendarBinding).where(CalendarBinding.household_id == 1))
+    if not binding:
+        raise HTTPException(status_code=404, detail="Calendar binding not found")
+    binding.calendar_id = payload.calendar_id
+    binding.calendar_name = payload.calendar_name or None
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/admin/calendar-new")
+def admin_post_calendar_new(payload: CalendarNewIn, db: Session = Depends(get_db)):
+    credential = db.scalar(
+        select(GoogleCredential).where(
+            GoogleCredential.household_id == 1,
+            GoogleCredential.status == "active",
+        )
+    )
+    if not credential:
+        raise HTTPException(status_code=404, detail="No Google credential found")
+    if getattr(settings, "google_calendar_mode", "live") == "live" and should_refresh_token(credential.token_expiry):
+        if not credential.refresh_token:
+            raise HTTPException(status_code=400, detail="Credential expired and no refresh token")
+        try:
+            new_access_token, new_expiry = refresh_google_access_token(
+                refresh_token=credential.refresh_token,
+                client_id=settings.google_client_id,
+                client_secret=settings.google_client_secret,
+                timeout_sec=settings.google_calendar_timeout_sec,
+            )
+            credential.access_token = new_access_token
+            credential.token_expiry = new_expiry
+            db.flush()
+        except GoogleAuthError as exc:
+            raise HTTPException(status_code=400, detail=f"Token refresh failed: {exc}") from exc
+    try:
+        result = calendar_provider.create_calendar(credential.access_token, payload.name)
+    except CalendarMutationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    binding = db.scalar(select(CalendarBinding).where(CalendarBinding.household_id == 1))
+    if not binding:
+        raise HTTPException(status_code=404, detail="Calendar binding not found")
+    binding.calendar_id = result["id"]
+    binding.calendar_name = result["summary"]
+    db.commit()
+    return {"ok": True, "calendar_id": result["id"], "calendar_name": result["summary"]}
 
 
 @app.get("/admin/reminders", response_model=list[ReminderOut])
@@ -6439,6 +6601,7 @@ def _onboarding_context(db: Session) -> dict:
     credential = db.scalar(
         select(GoogleCredential).where(GoogleCredential.household_id == 1, GoogleCredential.status == "active")
     )
+    binding = db.scalar(select(CalendarBinding).where(CalendarBinding.household_id == 1)) if credential else None
     return {
         "profile": admin_get_profile(db),
         "settings": admin_get_settings(db),
@@ -6446,6 +6609,8 @@ def _onboarding_context(db: Session) -> dict:
         "prefs": admin_get_preferences(db),
         "calendar_connected": credential is not None,
         "calendar_email": credential.provider_user_email if credential else None,
+        "calendar_id": binding.calendar_id if binding else "",
+        "calendar_name": binding.calendar_name if binding else "",
     }
 
 
