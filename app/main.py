@@ -77,6 +77,8 @@ from app.services.agent_threads import (
     build_email_reply_headers,
     email_session_id,
     extract_header_value,
+    household_session_id,
+    load_recent_household_documents,
     load_thread_documents,
     persist_thread_documents,
     queue_session_message,
@@ -661,6 +663,7 @@ def _build_command_tool_runtime(
                 household_id=user.household_id,
                 response_channel=response_channel,
                 thread_or_conversation_key=_followup_context_key(source),
+                cross_channel=True,
             )
             contexts = [active_context] if active_context is not None else []
             contexts.extend(load_recent_followup_contexts(db, household_id=user.household_id, limit=3))
@@ -740,6 +743,7 @@ def _build_command_tool_runtime(
             household_id=user.household_id,
             response_channel=response_channel,
             thread_or_conversation_key=_followup_context_key(source),
+            cross_channel=True,
         )
         explicit_candidate: Optional[ExtractedEvent] = None
         if title and start_at_iso and end_at_iso:
@@ -1311,6 +1315,7 @@ def _match_extracted_event_preferences(
             positive_preference_topics=list(priority_preferences["user_priority_topics"]),
             suppressed_priority_topics=list(priority_preferences["effective_suppressed_priority_topics"]),
             document_understanding=document_understanding,
+            topic_aliases=dict(priority_preferences.get("topic_aliases") or {}),
         )
     except NotImplementedError:
         return []
@@ -1392,6 +1397,7 @@ def _route_extracted_events(
             timezone_hint=timezone_hint,
             evaluation_datetime_utc=evaluation_datetime_utc,
             document_understanding=document_understanding,
+            preference_match_decisions=preference_match_decisions or None,
         )
     except NotImplementedError:
         decisions = []
@@ -1991,10 +1997,7 @@ def _response_target_for_channel(user: User, channel: str) -> str:
 
 
 def _source_session_id(source: SourceMessage) -> str:
-    if source.source_channel == "sms":
-        return sms_session_id(household_id=source.household_id)
-    thread_key = str(source.thread_key or source.provider_message_id or "").strip()
-    return email_session_id(household_id=source.household_id, thread_key=thread_key)
+    return household_session_id(household_id=source.household_id)
 
 
 def _followup_context_key(source: SourceMessage) -> str:
@@ -2004,15 +2007,18 @@ def _followup_context_key(source: SourceMessage) -> str:
 
 
 def _append_user_turn_to_session(db: Session, source: SourceMessage) -> None:
-    if source.source_channel == "sms":
-        text = str(source.body_text or "").strip()
+    channel = source.source_channel or "unknown"
+    if channel == "sms":
+        body = str(source.body_text or "").strip()
+        text = f"[via SMS] {body}" if body else ""
     else:
-        text = (
+        body = (
             "Email subject:\n"
             f"{source.subject or ''}\n\n"
             "Email body:\n"
             f"{source.body_text or ''}"
         ).strip()
+        text = f"[via email] {body}" if body else ""
     if not text:
         return
     queue_session_message(
@@ -2096,11 +2102,12 @@ def _send_user_response(
     )
     session_id = _CURRENT_CONVERSATION_SESSION_ID.get()
     if session_id and result.get("sent"):
+        channel_tag = f"[via {channel}] " if channel else ""
         queue_session_message(
             db,
             session_id,
             role="assistant",
-            text=message,
+            text=f"{channel_tag}{message}",
         )
 
 
@@ -5411,9 +5418,10 @@ def inbound_sms(
         priority_preferences=priority_preferences,
     )
     db.commit()
+    recent_documents = load_recent_household_documents(db, household_id=user.household_id, limit=3)
     with _conversation_runtime_scope(
         source=source,
-        thread_documents=[],
+        thread_documents=recent_documents,
         household_context=agent_household_context,
     ):
         try:
@@ -5515,6 +5523,7 @@ def inbound_sms(
                 household_id=user.household_id,
                 response_channel="sms",
                 thread_or_conversation_key=_followup_context_key(source),
+                cross_channel=True,
             )
             _mark_receipt_processed(receipt)
             db.commit()
@@ -5665,6 +5674,7 @@ def inbound_sms(
             household_id=user.household_id,
             response_channel="sms",
             thread_or_conversation_key=_followup_context_key(source),
+            cross_channel=True,
         )
         return _handle_add_command(
             db=db,
@@ -6219,6 +6229,7 @@ def _parse_preference_notes(raw_text: str, db: Session | None = None) -> dict:
         return {
             "positive_topics": list(parsed.get("positive_topics") or []),
             "negative_topics": list(parsed.get("negative_topics") or []),
+            "topic_aliases": dict(parsed.get("topic_aliases") or {}),
             "status": "success",
             "error": "",
         }
@@ -6234,6 +6245,7 @@ def _parse_preference_notes(raw_text: str, db: Session | None = None) -> dict:
             return {
                 "positive_topics": list(fallback.get("positive_topics") or []),
                 "negative_topics": list(fallback.get("negative_topics") or []),
+                "topic_aliases": dict(fallback.get("topic_aliases") or {}),
                 "status": "success",
                 "error": "",
             }
@@ -6242,6 +6254,7 @@ def _parse_preference_notes(raw_text: str, db: Session | None = None) -> dict:
         return {
             "positive_topics": [],
             "negative_topics": [],
+            "topic_aliases": {},
             "status": "error",
             "error": f"{detail[:120]} | fallback={fallback_detail[:70]}",
         }
@@ -6276,6 +6289,7 @@ def admin_put_preferences(payload: PreferenceIn, db: Session = Depends(get_db)):
         ),
         parse_status=str(parsed_preferences.get("status") or "success"),
         parse_error=str(parsed_preferences.get("error") or ""),
+        topic_aliases=dict(parsed_preferences.get("topic_aliases") or {}),
     )
     db.commit()
     return {"ok": True, "version": profile.version}

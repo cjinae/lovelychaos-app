@@ -378,19 +378,16 @@ def test_openai_preference_parser_uses_segmented_clause_payload(monkeypatch):
         return PreferenceParseOutput(
             classifications=[
                 PreferenceClauseClassificationOutput(
-                    clause="i care about pizza days",
+                    clause="i care about pizza days, swim days.",
                     polarity="positive",
-                    topic="Pizza Days",
-                ),
-                PreferenceClauseClassificationOutput(
-                    clause="swim days.",
-                    polarity="unclear",
-                    topic="Swim Days",
+                    topic="Pizza Days, Swim Days",
+                    aliases=[],
                 ),
                 PreferenceClauseClassificationOutput(
                     clause="I don't care about cultural days.",
                     polarity="negative",
                     topic="Heritage Months",
+                    aliases=["heritage month", "cultural event", "awareness month"],
                 ),
             ]
         )
@@ -407,8 +404,7 @@ def test_openai_preference_parser_uses_segmented_clause_payload(monkeypatch):
     assert parsed["negative_topics"] == ["Heritage Months"]
     assert "clause classifier" in captured["system_prompt"]
     assert '"clauses": [' in captured["user_payload"]
-    assert '"i care about pizza days"' in captured["user_payload"]
-    assert '"swim days."' in captured["user_payload"]
+    assert '"i care about pizza days, swim days."' in captured["user_payload"]
     assert '"I don\'t care about cultural days."' in captured["user_payload"]
 
 

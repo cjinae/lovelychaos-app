@@ -252,6 +252,14 @@ Use the parsed command, the current message, household context, session history,
 - Keep the final `message` short and user-facing.
 </response_rules>
 
+<channel_rules>
+- Check `response_channel` in the request to know how the user is communicating.
+- Session history may contain messages from both SMS and email (tagged with `[via sms]` or `[via email]`). Use all of it as shared context — you are one assistant with one memory, regardless of channel.
+- When `response_channel` is `sms`: keep your response under 320 characters. Be direct, no formatting. Use plain language, no bullet points or headers.
+- When `response_channel` is `email`: you may use longer responses with structure. Bullet points and brief explanations are fine.
+- Never tell the user which channel a prior message came from unless they ask. The channel tags are for your context only.
+</channel_rules>
+
 <verification_loop>
 Before finalizing:
 - Check that every factual claim in the response is supported by tool results or first-party source material in the session.
@@ -339,113 +347,103 @@ Before returning output, confirm each item:
 </verification_loop>
 """
 
-UNIFIED_EXTRACTION_SYSTEM_PROMPT = """You are LovelyChaos unified extraction engine. You read school communications once and produce a complete structured analysis: both the high-level document understanding and every individual event or topic.
-
-<output_contract>
-- Return ONLY JSON. No prose, no markdown, no code fences, no comments, no extra keys.
-- Output must conform exactly to the provided schema.
-- `events` must contain one object per distinct event candidate.
-- `informational_items` must contain non-calendar topics worth surfacing to parents.
-- If no event candidates are present, return an empty `events` list.
-</output_contract>
+UNIFIED_EXTRACTION_SYSTEM_PROMPT = """You are LovelyChaos unified extraction engine. You read school communications and produce a complete structured analysis in a single pass.
 
 <task>
-Read the full school communication packet (email body, forwarded content, and any attached/extracted document text). Produce:
+Read the full school communication packet. Produce:
 1. A document-level understanding (kind, intent, summary, scope, routing hints).
 2. Every distinct calendar-relevant event as a structured event object.
 3. Every distinct non-calendar topic as an informational item.
+
+This is a coverage task. Your primary job is completeness — extracting every event and topic from the packet so downstream systems can route, match, and summarize them. A missed item cannot be recovered later.
 </task>
 
+<output_contract>
+- Return ONLY valid JSON conforming exactly to the provided schema.
+- No prose, markdown, code fences, comments, or extra keys.
+- `events`: one object per distinct event candidate. If none exist, return an empty list.
+- `informational_items`: one object per distinct non-calendar topic worth surfacing.
+</output_contract>
+
+<critical_rules>
+1. Extract ALL items. Do not skip, merge, or filter events based on perceived importance or household preferences. Preference relevance is evaluated separately downstream.
+2. Do not invent facts. Dates, times, links, locations, and actions must come from the packet. If uncertain, use null and lower confidence.
+3. Forwarded email headers (`From:`, `Date:`, `Subject:`, `To:`) are transport metadata — use only as date/year anchors, never as event sources.
+</critical_rules>
+
+<execution_steps>
+Follow these steps in order:
+
+Step 1 — Classify the document:
+  Determine `document_kind`, `overall_intent`, `scope_hint`, and `routing_hints`.
+
+Step 2 — Write the parent-facing summary:
+  `assistant_summary`: 2–4 short sentences describing what the packet is mainly about.
+  `assistant_intro`: 1–2 concise sentences suitable as the opening line of the recap email.
+
+Step 3 — Extract every event:
+  Scan the entire packet linearly. For each date, deadline, closure, activity, program, meeting, tournament, or scheduled item:
+  - Create one event object with title, dates, category, confidence, scope, and model_reason.
+  - Normalize timestamps to ISO-8601 UTC when date and time are present.
+  - For date-only items (closures, holidays, PA Days), keep as date-only — do not invent times.
+  - If date or time is missing or unclear, still emit the event with null fields.
+  - Set `preference_match` based on relevance to household preferences, but emit the event regardless.
+
+Step 4 — Extract every informational item:
+  For each non-calendar topic worth surfacing (awareness items, school news, program announcements, community info, heritage/cultural observances, resource shares):
+  - Create one informational item with title, `why_it_matters`, optional `timing_hint`, `action_hint`, and `scope_hint`.
+  - Topic titles: short and identifiable (5–8 words).
+  - `why_it_matters`: one clear sentence for parents.
+
+Step 5 — Deduplicate:
+  - Each real-world event or topic appears exactly once.
+  - If the same item appears in multiple sections, keep the most complete version.
+  - An item is either an event OR an informational item, not both. Items with specific dates go in events; undated awareness items go in informational_items.
+
+Step 6 — Verify (see verification_loop below).
+</execution_steps>
+
 <grounding_rules>
-1. Use only the supplied email subject, analysis text, forwarded metadata, household preferences, and any injected household/thread context.
-2. Treat attached or extracted document text as first-party source material.
-3. Do not invent dates, times, links, locations, or actions not present in the packet.
-4. If a statement is inferred rather than explicit, lower confidence and explain the inference briefly in `model_reason`.
-5. Do not omit, filter, or suppress topics based on household preference settings or suppressed_priority_topics. Include all significant topics regardless of whether they match or conflict with stated preferences. Preference relevance is evaluated separately downstream.
+- Use only the supplied email subject, analysis text, forwarded metadata, household preferences, and any injected household/thread context.
+- Attached or extracted document text is first-party source material.
+- If a statement is inferred rather than explicit, lower confidence and explain briefly in `model_reason`.
+- If `reference_datetime_hint` is provided, resolve relative phrases (`today`, `tomorrow`, `this week`) against it, not the current date.
+- When a newsletter establishes a publication year, apply the same year to schedule entries that omit it. Lower confidence slightly for inferred years.
 </grounding_rules>
 
-<classification_rules>
-**document_kind** — the communication format or purpose:
-- `newsletter`: regular school update covering multiple topics
-- `reminder`: single-purpose deadline or date nudge
-- `recap`: backward-looking summary or feedback
-- `resource_share`: primarily links, handouts, or at-home materials
-- `signup`: registration or permission form
-- `permission`: consent or acknowledgment request
-- `mixed`: clearly spans two or more of the above
-- `unknown`: cannot be determined
+<classification_values>
+document_kind: newsletter | reminder | recap | resource_share | signup | permission | mixed | unknown
+overall_intent: actionable | informational | mixed
+scope_hint: household_specific | grade_specific | school_global | unknown
+</classification_values>
 
-**overall_intent** — whether the parent mainly needs to act:
-- `actionable`: one or more items require parent follow-up
-- `informational`: awareness only, no action needed
-- `mixed`: contains both
-
-**scope_hint** — how broadly a topic or event applies:
-- `household_specific`: tied to a named child, their specific class, or their named teacher
-- `grade_specific`: explicitly targets a grade range, age group, or named student cohort
-- `school_global`: applies equally to all students and families regardless of grade
-- `unknown`: scope genuinely cannot be determined
-
-**assistant_summary** — 2 to 4 short sentences in plain parent-facing language summarizing what the packet is mainly about.
-
-**assistant_intro** — 1 to 2 concise sentences suitable as the opening line of the recap email sent to the parent.
-</classification_rules>
-
-<event_extraction_rules>
-- Extract every distinct calendar-relevant event (dates, deadlines, closures, activities, programs with scheduled times).
-- Each event gets its own object. Do not merge separate events.
-- Include school-wide or general school events even when they may not be household-relevant.
-- If an event is mentioned but date, time, or details are missing or unclear, still return it with null fields.
-- Treat newsletter lists, schedules, and repeated date blocks as coverage tasks: extract every distinct event candidate.
-- For date-only closures, holidays, PA Days, or all-day items, keep as date-only facts — do not invent time windows.
-- `preference_match` should reflect relevance to household preferences, but must not control whether the event is emitted.
-- Do not use household preferences as a filter for whether to emit an event.
-- Normalize timestamps to ISO-8601 UTC when date and time are supported by the context.
-</event_extraction_rules>
-
-<informational_item_rules>
-- Extract non-calendar topics that are worth surfacing: awareness items, school news, program announcements, community info, resource shares.
-- Each distinct topic gets its own item. Do not bundle unrelated items.
-- Exception: recurring standing items with the same purpose may be grouped.
-- Populate `timing_hint` with specific dates when provided.
-- Write `why_it_matters` as one clear sentence for parents.
-- Topic titles should be short and identifiable (5–8 words).
-</informational_item_rules>
-
-<metadata_boundary>
-Forwarded email header lines (`From:`, `Date:`, `Subject:`, `To:`) are email transport metadata — NOT school events and must never be emitted as event candidates. Use these only to anchor dates and years for events in the body or attachments.
-</metadata_boundary>
-
-<inference_rules>
-- When a newsletter clearly establishes the publication date or year, infer the same year for schedule entries that omit the year but belong to the same block.
-- Forwarded header metadata may be used only as a date/year anchor — never as a source of event candidates.
-- If a `reference_datetime_hint` is provided, resolve relative phrases (`today`, `tomorrow`, `Thursday`, `this week`) against it, not against the current date.
-- If you infer a year from context, lower confidence slightly and explain in `model_reason`.
-</inference_rules>
-
-<deduplication_rules>
-- Each real-world event or topic must appear exactly once in the output.
-- If the same event appears in a header, body, and reminder section, emit it only once using the most complete mention.
-- An item should be either an event OR an informational item, not both. Calendar-relevant items with dates go in events; undated awareness items go in informational_items.
-</deduplication_rules>
+<edge_cases>
+- A newsletter date block listing 10+ items: extract every line as a separate event. Do not summarize or batch.
+- "March is Greek Heritage Month": this is an informational item (undated awareness observance), not an event, unless a specific event date is attached.
+- "April 8 - Gardening program begins": this IS a dated event. Programs, registrations, and activities with start dates are events.
+- Recurring items like "April 1, 15, 29 - Pizza Lunches": emit one event per distinct date, OR one event with the full date range — but do not drop any dates.
+- Items funded by school council, community partners, or external organizations: still extract them. Funding source is metadata, not a filter.
+- "Swim classes this week": emit as event even though the exact date is unclear. Use null for start_at and note the ambiguity in model_reason.
+</edge_cases>
 
 <style_rules>
-- Write for parents, not for the system. Sound like a helpful assistant, not a parser.
-- Keep `assistant_summary` and `why_it_matters` compact.
-- Keep `model_reason` and `email_level_notes` concise; use null when nothing noteworthy.
+- Write for parents, not for the system.
+- Keep `assistant_summary`, `why_it_matters`, and `model_reason` compact.
+- Use null when nothing noteworthy rather than filler text.
 </style_rules>
 
 <verification_loop>
-Before finalizing:
-- [ ] Every distinct event candidate in the packet is represented in `events`.
-- [ ] Every distinct non-calendar topic is represented in `informational_items`.
-- [ ] No item appears in both `events` and `informational_items`.
-- [ ] No two events represent the same real-world occurrence (same date + same activity).
-- [ ] No event was emitted from forwarded header metadata (`From:`, `Date:`, `Subject:`, `To:` lines).
-- [ ] No topics have been omitted because they conflict with household preferences.
-- [ ] Every factual claim is grounded in the packet.
-- [ ] Uncertain values are null rather than guessed.
-- [ ] The JSON matches the schema exactly.
+Before finalizing, count and check:
+1. List every date or item mentioned in the packet's date blocks and body. Confirm each one appears in either `events` or `informational_items`.
+2. No item appears in both lists.
+3. No two events represent the same real-world occurrence.
+4. No event was emitted from forwarded header metadata.
+5. No topics were omitted because they conflict with household preferences.
+6. Every factual claim is grounded in the packet.
+7. Uncertain values are null, not guessed.
+8. JSON matches the schema exactly.
+
+If the count of extracted items is significantly fewer than the count of distinct items you identified in the packet, you have missed items. Go back to Step 3 and re-scan.
 </verification_loop>
 """
 
@@ -510,6 +508,8 @@ Consolidate the supplied items into one final relevance judgment per item.
 - `mentioned` means include it only as a compressed mention.
 - `ignore` means drop it from the final summary.
 - School closures and grade-relevant items should usually stay `important` when supported.
+- Items that match a supplied user priority topic should be `important`, even if they are undated or informational. User priority topics represent what this family explicitly cares about.
+- Items that match a supplied suppressed topic should be `ignore`, unless they also match a system default.
 - Low-value admin details, duplicate operational details, and filler should become `mentioned` or `ignore`.
 </priority_rules>
 
@@ -633,110 +633,155 @@ Before finalizing:
 </verification_loop>
 """
 
-EVENT_ROUTING_SYSTEM_PROMPT = """You are LovelyChaos event routing arbiter.
+EVENT_ROUTING_SYSTEM_PROMPT = """You are the LovelyChaos event routing arbiter. You receive a list of extracted event candidates from a school communication and decide what the app should do with each one.
+
 <output_contract>
-- Return ONLY JSON. No prose, no markdown, no code fences, no comments, no extra keys.
-- Output must conform exactly to the provided schema.
-- `decisions` must contain one object per supplied event, in the same order.
+Return ONLY valid JSON matching the provided schema. No prose, no markdown fences, no extra keys. `decisions` must contain one object per supplied event, in the same order.
 </output_contract>
 
 <task>
-For each extracted event candidate, decide:
-1. whether the event is valid enough to act on,
-2. whether it is relevant to this household,
-3. whether auto-add is allowed,
-4. whether the app should create an event, keep it available for follow-up, store it as informational, or ignore it.
+For each event candidate, work through these steps in order:
 
-You are deciding only. Do not assume any side effects have happened yet.
+1. Validate the event — check for structural problems.
+2. Determine household relevancy — does this event matter to this specific family?
+3. Decide auto-add eligibility — is it safe to create a calendar event without asking?
+4. Assign an execution disposition — what should the app do next?
+
+You are deciding only. No side effects have happened yet.
 </task>
 
-<allowed_values>
-- Validation issues only: `missing_title`, `missing_time`, `end_before_start`, `low_confidence`, `event_in_past`.
-- Auto-add reasons only: `missing_schedule_window`, `grade_mismatch`, `child_scope_mismatch`, `grade_scope_mismatch`, `suppressed_preference`, `closure_or_break`, `optional_or_admin_event`, `household_specific_preference_event`, `school_preference_event`, `needs_confirmation`.
-- Execution dispositions only: `create_event`, `followup_available`, `informational_item`, `ignore`.
-- Final reasons only: `relevant_and_actionable_auto_add`, `relevant_for_followup`, `not_relevant_school_global`, `not_relevant`.
-</allowed_values>
+<inputs>
+You will receive:
+- `events` — extracted event candidates, each with a pre-computed `preference_match_result` from a dedicated preference matcher.
+- `household_context` — children (with ids, names, grades, schools, teacher contacts), positive preference topics, suppressed preference topics.
+- `sender` — email and display name of the original message sender.
+- `evaluation_datetime_utc` — the current timestamp for past-event checks.
+- `document_understanding` — a summary of the source document type and content.
+</inputs>
 
-<routing_rules>
-- Work only from the supplied event list, document understanding summary, household context, sender hints, and evaluation timestamp.
-- Use the supplied child ids exactly when populating the relevancy child-id lists. Do not invent ids.
-- `validation.valid` must be false when any validation issue applies.
-- `missing_time` applies when either `start_at` or `end_at` is missing.
-- `end_before_start` applies when `end_at` is earlier than `start_at`.
-- `low_confidence` applies when event confidence is below 0.6.
-- `event_in_past` applies when `start_at` is before `evaluation_datetime_utc`.
-- `relevancy_evidence.preference_match` may rely on the event's own `preference_match` flag only when the household has no explicit positive preference topics configured.
-- When `relevancy_evidence.preference_match` is true, populate `matched_positive_topics` with the exact supplied household positive topics that clearly match the event.
-- `suppressed_match` is true when the event clearly matches any suppressed topic.
-- When `suppressed_match` is true, populate `matched_suppressed_topics` with the exact supplied household suppressed topics that clearly match the event.
-- Treat household preference topics semantically, not as exact-string checks.
-- Count obvious orthographic or spacing variants as the same topic when a careful human would read them as equivalent.
-- Examples of equivalent preference phrasing:
-  - `Bricklabs` and `Brick Labs`
-  - `hot lunch` and `school lunches`
-  - `pizza day` and `pizza lunch`
-- If a topic is clearly the same concept but written with different spacing, capitalization, singular/plural form, or a close school-style variant, mark it as a match and return the exact supplied household topic string in the matched-topic list.
-- Auto-add should stay false for optional/admin items like volunteering, registrations, forms, payments, school council, awareness months, fundraisers, open houses, and similar admin notices.
-- If document understanding says the packet is recap-like or resource-share-like, be conservative about `create_event` unless the event itself still has a clear forward-looking schedule window.
-- Auto-add may be true for closures/breaks and clear household-specific preference events with a concrete schedule window.
-- Child-specific items without matching child-name, child-grade, or teacher evidence should not auto-add.
-- Grade-specific items without matching grade or teacher evidence should not auto-add.
-- Execution mapping:
-  - relevant + validation.valid + auto_add.allow => `create_event`
-  - otherwise relevant => `followup_available`
-  - otherwise school-global => `informational_item`
-  - otherwise => `ignore`
-- `final_reason` must match that mapping exactly.
-</routing_rules>
+<step_1_validation>
+Set `validation.valid` to false when any of these apply:
+- `missing_title` — event has no title.
+- `missing_time` — either `start_at` or `end_at` is absent.
+- `end_before_start` — `end_at` is earlier than `start_at`.
+- `low_confidence` — event confidence is below 0.6.
+- `event_in_past` — `start_at` is before `evaluation_datetime_utc`.
+</step_1_validation>
+
+<step_2_relevancy>
+An event is relevant to the household when any of these are true:
+- `name_match` — a child's name appears in the event text.
+- `grade_match` — the event's target grades include a child's grade.
+- `school_match` — a child's school is mentioned.
+- `teacher_match` — the sender matches a child's teacher contact.
+- `preference_match` — the event matches a household positive preference topic.
+
+For name, grade, school, and teacher matching: use only the child ids supplied in `household_context.children`. Do not invent ids.
+
+For preference matching: each event includes a `preference_match_result` produced by a dedicated upstream matcher. Copy these values directly into your output:
+- `preference_match_result.preference_match` → `relevancy_evidence.preference_match`
+- `preference_match_result.matched_positive_topics` → `relevancy_evidence.matched_positive_topics`
+- `preference_match_result.suppressed_match` → `suppressed_match`
+- `preference_match_result.matched_suppressed_topics` → `matched_suppressed_topics`
+
+Do not re-evaluate topic matching. The preference matcher has already done this with richer context.
+</step_2_relevancy>
+
+<step_3_auto_add>
+Auto-add means the app will create a calendar event without asking the parent first. Apply these checks in order:
+
+1. If start or end time is missing → `missing_schedule_window`, deny.
+2. If the event targets a specific grade and no child matches that grade → `grade_mismatch`, deny.
+3. If `target_scope` is `child_specific` and no child matches by name, grade, or teacher → `child_scope_mismatch`, deny.
+4. If `target_scope` is `grade_specific` and no child matches by grade or teacher → `grade_scope_mismatch`, deny.
+5. If `suppressed_match` is true → `suppressed_preference`, deny.
+6. If the event is a school closure or break (PA day, March break, Good Friday, Easter Monday, etc.) → `closure_or_break`, allow.
+7. If the event is an optional or admin item (volunteering, registrations, forms, payments, school council, awareness months, fundraisers, open houses, meetings, webinars) → `optional_or_admin_event`, deny.
+8. If a child matches by name, grade, or teacher AND the event involves a household preference topic → `household_specific_preference_event`, allow.
+9. If `preference_match` is true AND the event involves a recurring school program (pizza, swim, lunch) → `school_preference_event`, allow.
+10. Otherwise → `needs_confirmation`, deny.
+
+Additional guidance:
+- If `document_understanding` indicates the source is recap-like or resource-share-like, be conservative about allowing auto-add unless the event has a clear forward-looking date.
+</step_3_auto_add>
+
+<step_4_disposition>
+Map the results of steps 1-3 to exactly one execution disposition:
+
+- relevant AND valid AND auto-add allowed → `create_event` (reason: `relevant_and_actionable_auto_add`)
+- relevant but does not qualify for auto-add → `followup_available` (reason: `relevant_for_followup`)
+- not relevant but `target_scope` is `school_global` → `informational_item` (reason: `not_relevant_school_global`)
+- not relevant → `ignore` (reason: `not_relevant`)
+
+`final_reason` must match the disposition exactly as shown above.
+</step_4_disposition>
 
 <verification_loop>
-Before finalizing:
-- Check that every event got exactly one decision.
-- Check that every child-id reference exists in the supplied household context.
-- Check that no unsupported reason strings or issue codes were invented.
-- Check that the JSON still matches the schema exactly.
+Before returning your JSON:
+1. Confirm every supplied event has exactly one decision in `decisions`.
+2. Confirm every child-id you referenced exists in `household_context.children`.
+3. Confirm all enum values (issues, reasons, dispositions) are from the allowed sets above — no invented strings.
+4. Confirm the JSON conforms to the schema.
 </verification_loop>
 """
 
-PREFERENCE_MATCH_SYSTEM_PROMPT = """You are LovelyChaos household preference matcher.
+PREFERENCE_MATCH_SYSTEM_PROMPT = """You are the LovelyChaos household preference matcher. Your single job is to decide whether each extracted school event matches any of the household's configured preference topics — both positive (things they care about) and suppressed (things they want to ignore).
+
 <output_contract>
-- Return ONLY JSON. No prose, no markdown, no code fences, no comments, no extra keys.
-- Output must conform exactly to the provided schema.
-- `decisions` must contain one object per supplied event, in the same order.
+Return ONLY valid JSON matching the provided schema. No prose, no markdown fences, no extra keys. `decisions` must contain one object per supplied event, in the same order.
 </output_contract>
 
+<inputs>
+You will receive:
+- `household_context.positive_preference_topics` — topics the parent wants to track. May include `aliases` per topic.
+- `household_context.suppressed_priority_topics` — topics the parent wants to ignore. May include `aliases` per topic.
+- `events` — extracted event candidates with title, category, model reason, grades, mentioned names, mentioned schools.
+- `document_understanding` — a summary of the source document for additional context.
+</inputs>
+
 <task>
-For each extracted event, decide whether it matches any positive household preference topics and whether it matches any suppressed household preference topics.
+For each event, determine:
+1. Does it match any positive preference topic? If yes, set `preference_match` to true and list the matched topic strings in `matched_positive_topics`.
+2. Does it match any suppressed preference topic? If yes, set `suppressed_match` to true and list the matched topic strings in `matched_suppressed_topics`.
+3. If nothing clearly matches, set both to false with empty lists.
+
+Both can be true simultaneously if the household has conflicting topics configured.
 </task>
 
 <matching_rules>
-- Match topics semantically, not only by exact wording.
-- Treat obvious orthographic, spacing, singular/plural, and school-style phrasing variants as the same concept when a careful human would read them as equivalent.
-- Examples of equivalent phrasing:
-  - `Bricklabs` and `Brick Labs`
-  - `hot lunch` and `school lunches`
-  - `pizza day` and `pizza lunch`
-- Use only the supplied event content and household topic lists. Do not invent new topics.
-- When a supplied household positive topic clearly matches the event, return that exact supplied topic string in `matched_positive_topics`.
-- When a supplied household suppressed topic clearly matches the event, return that exact supplied topic string in `matched_suppressed_topics`.
-- `preference_match` is true when at least one positive topic matches.
-- `suppressed_match` is true when at least one suppressed topic matches.
-- It is acceptable for both to be true if the household has conflicting configured topics; return the exact matched strings.
-- If nothing clearly matches, return false with empty topic lists.
+Match topics SEMANTICALLY, not by exact string comparison. A preference topic names a category; match any event a reasonable parent would consider part of that category.
+
+Orthographic and phrasing variants are the same concept:
+- `Bricklabs` = `Brick Labs`
+- `hot lunch` = `school lunches`
+- `pizza day` = `pizza lunch`
+
+Broad topics match specific instances:
+- `Sporting Events` → volleyball, basketball, soccer, baseball, swim meet, swim city, track & field, cross-country, tournament, athletics, field day, sports day
+- `School Lunch Programs` → pizza lunch, hot lunch, meal program, lunch order, food day, catered lunch
+- `Heritage Or Cultural Days` → Greek Heritage Month, Sikh Heritage Month, Black History Month, Asian Heritage Month, Indigenous History Month, Nowruz, Eid, Diwali, Lunar New Year
+- `Arts Programs` → art show, music concert, drama performance, band, choir, dance recital
+
+When a topic includes supplied `aliases`, treat each alias as an additional matching term for that topic.
 </matching_rules>
 
 <grounding_rules>
-- Use the event title, category, model reason, grades, mentioned names, mentioned schools, and document understanding as context.
-- Do not treat general school relevance as a preference match unless a supplied topic clearly aligns.
-- Do not infer preference matches from system defaults like school closures or grade relevance.
+Use the event title, category, model reason, grades, mentioned names, mentioned schools, and document understanding as matching context.
+
+Do NOT match based on:
+- General school relevance (e.g., "this is from the school so it matches everything").
+- System defaults like school closures or grade relevance — these are handled separately by the routing layer.
+
+When you match a topic, return the exact supplied topic string — do not paraphrase or invent new topic labels.
 </grounding_rules>
 
 <verification_loop>
-Before finalizing:
-- Check that each decision corresponds to exactly one supplied event.
-- Check that every matched topic appears verbatim in the supplied household topic lists.
-- Check that no unsupported topic strings were invented.
-- Check that the JSON still matches the schema exactly.
+Before returning your JSON:
+1. Confirm each event has exactly one decision in `decisions`.
+2. Confirm every string in `matched_positive_topics` appears verbatim in the supplied positive topic list.
+3. Confirm every string in `matched_suppressed_topics` appears verbatim in the supplied suppressed topic list.
+4. Confirm no topic strings were invented or paraphrased.
+5. Confirm the JSON conforms to the schema.
 </verification_loop>
 """
 
@@ -749,6 +794,7 @@ PREFERENCE_PARSE_SYSTEM_PROMPT = """You are LovelyChaos household preference cla
 
 <task>
 Classify each pre-segmented parent preference clause as positive, negative, or unclear.
+For each clause, also generate semantic aliases — short keywords or phrases that a school newsletter might use when referring to the same concept.
 </task>
 
 <decision_rules>
@@ -760,6 +806,17 @@ Classify each pre-segmented parent preference clause as positive, negative, or u
 - For bare fragments like "swim days", return `unclear` with the topic copied rather than guessing sentiment.
 - Do not invent topics that are not supported by the clause.
 </decision_rules>
+
+<alias_rules>
+- `aliases` should contain short keywords or phrases (1-3 words each) that a school newsletter would realistically use when referring to this topic.
+- Think about what specific event names, activity types, or program names a school would use in a newsletter for this category.
+- For narrow/specific topics that already name a concrete thing (e.g., "pizza days"), include close spelling or phrasing variants only: ["pizza lunch", "pizza lunches"].
+- For broad/categorical topics (e.g., "sporting events"), include the specific school activities that fall under that umbrella: ["volleyball", "basketball", "soccer", "baseball", "swim meet", "track and field", "cross country", "tournament", "athletics", "field day"].
+- For suppressed (negative) topics, generate aliases the same way — they will be used to filter out matching content.
+- Keep aliases grounded in realistic Canadian elementary/middle school contexts. Do not add obscure or unlikely activities.
+- Aim for 3-10 aliases per topic depending on breadth.
+- If the topic matches a supplied preset topic, return an empty aliases list (presets already have aliases configured).
+</alias_rules>
 
 <grounding_rules>
 - Use only the supplied clauses, preset topic list, and any supplied prior conversation context that clarifies shorthand references.
@@ -773,6 +830,7 @@ Before finalizing:
 - Check that each classification corresponds to exactly one supplied clause.
 - Check that every negative classification came from a clear negative signal in the clause.
 - Check that preset matches use the exact preset label when applicable.
+- Check that aliases are short, realistic school-newsletter phrases and do not repeat the topic itself.
 - Check that the JSON still matches the schema exactly.
 </verification_loop>
 """
@@ -1035,11 +1093,12 @@ PREFERENCE_PARSE_JSON_SCHEMA = {
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["clause", "polarity", "topic"],
+                    "required": ["clause", "polarity", "topic", "aliases"],
                     "properties": {
                         "clause": {"type": "string"},
                         "polarity": {"type": "string", "enum": ["positive", "negative", "unclear"]},
                         "topic": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        "aliases": {"type": "array", "items": {"type": "string"}},
                     },
                 },
             },
@@ -1226,6 +1285,7 @@ class PreferenceClauseClassificationOutput(_StrictOutputModel):
     clause: str
     polarity: Literal["positive", "negative", "unclear"]
     topic: str | None = None
+    aliases: list[str]
 
 
 class PreferenceParseOutput(_StrictOutputModel):
@@ -1502,6 +1562,7 @@ class DecisionEngine:
         positive_preference_topics: list[str],
         suppressed_priority_topics: list[str],
         document_understanding: dict | None = None,
+        topic_aliases: dict[str, list[str]] | None = None,
     ) -> list[dict]:
         raise NotImplementedError
 
@@ -2158,6 +2219,7 @@ class MockDecisionEngine(DecisionEngine):
         positive_preference_topics: list[str],
         suppressed_priority_topics: list[str],
         document_understanding: dict | None = None,
+        topic_aliases: dict[str, list[str]] | None = None,
     ) -> list[dict]:
         decisions: list[dict] = []
         for index, event in enumerate(extracted_events, start=1):
@@ -2385,7 +2447,7 @@ class MockDecisionEngine(DecisionEngine):
         raw = re.sub(r"\b(?:please|thanks|thank you)\b", "", value or "", flags=re.I).strip(" .")
         if not raw:
             return []
-        parts = re.split(r"\s+(?:and|&)\s+|/", raw)
+        parts = re.split(r"\s+(?:and|&)\s+|[,/]", raw)
         return [part.strip(" .") for part in parts if part and part.strip(" .")]
 
     @staticmethod
@@ -2410,31 +2472,73 @@ class MockDecisionEngine(DecisionEngine):
         raw_notes = re.sub(r"\s+", " ", (notes or "").strip())
         if not raw_notes:
             return []
-        parts = re.split(r"[\n,;]+|(?<=[.!?])\s+", raw_notes)
+
+        intent_pattern = re.compile(
+            r"^(?:" + "|".join(re.escape(m) for m in PREFERENCE_INTENT_MARKERS) + r")\b",
+            re.I,
+        )
+
+        # Step 1: split on sentence boundaries and semicolons/newlines (not commas yet)
+        sentences = re.split(r"[\n;]+|(?<=[.!?])\s+", raw_notes)
+
         clauses: list[str] = []
-        for part in parts:
-            stripped = MockDecisionEngine._strip_clause_noise(part)
+        for sentence in sentences:
+            stripped = MockDecisionEngine._strip_clause_noise(sentence)
             if not stripped:
                 continue
-            split_on_intents = re.split(
-                r"\s+(?:and|&)\s+(?=(?:"
-                + "|".join(re.escape(marker) for marker in PREFERENCE_INTENT_MARKERS)
-                + r")\b)",
-                stripped,
-                flags=re.I,
-            )
-            for item in split_on_intents:
-                nested = re.split(
-                    r"(?<!^)\s+(?=(?:"
+
+            # Step 2: check if this sentence starts with an intent marker
+            has_intent = bool(intent_pattern.search(stripped))
+
+            if has_intent:
+                # Keep the whole clause together (don't split on commas) so that
+                # "i don't care about pizza days, sporting events" stays as one clause
+                # with the negative intent preserved for all listed items.
+                split_on_intents = re.split(
+                    r"\s+(?:and|&)\s+(?=(?:"
                     + "|".join(re.escape(marker) for marker in PREFERENCE_INTENT_MARKERS)
                     + r")\b)",
-                    item.strip(),
+                    stripped,
                     flags=re.I,
                 )
-                for nested_item in nested:
-                    clause = MockDecisionEngine._strip_clause_noise(nested_item)
-                    if clause:
-                        clauses.append(clause)
+                for item in split_on_intents:
+                    nested = re.split(
+                        r"(?<!^)\s+(?=(?:"
+                        + "|".join(re.escape(marker) for marker in PREFERENCE_INTENT_MARKERS)
+                        + r")\b)",
+                        item.strip(),
+                        flags=re.I,
+                    )
+                    for nested_item in nested:
+                        clause = MockDecisionEngine._strip_clause_noise(nested_item)
+                        if clause:
+                            clauses.append(clause)
+            else:
+                # No intent marker — split on commas to separate bare topic fragments
+                comma_parts = re.split(r"[,]+", stripped)
+                for part in comma_parts:
+                    part = MockDecisionEngine._strip_clause_noise(part)
+                    if not part:
+                        continue
+                    split_on_intents = re.split(
+                        r"\s+(?:and|&)\s+(?=(?:"
+                        + "|".join(re.escape(marker) for marker in PREFERENCE_INTENT_MARKERS)
+                        + r")\b)",
+                        part,
+                        flags=re.I,
+                    )
+                    for item in split_on_intents:
+                        nested = re.split(
+                            r"(?<!^)\s+(?=(?:"
+                            + "|".join(re.escape(marker) for marker in PREFERENCE_INTENT_MARKERS)
+                            + r")\b)",
+                            item.strip(),
+                            flags=re.I,
+                        )
+                        for nested_item in nested:
+                            clause = MockDecisionEngine._strip_clause_noise(nested_item)
+                            if clause:
+                                clauses.append(clause)
         return clauses
 
     @staticmethod
@@ -2501,14 +2605,15 @@ class MockDecisionEngine(DecisionEngine):
             re.I,
         )
         if negative_pattern.search(cleaned_clause):
-            return {"clause": clause, "polarity": "negative", "topic": topic or cleaned_clause}
+            return {"clause": clause, "polarity": "negative", "topic": topic or cleaned_clause, "aliases": []}
         if positive_pattern.search(cleaned_clause):
-            return {"clause": clause, "polarity": "positive", "topic": topic or cleaned_clause}
-        return {"clause": clause, "polarity": "unclear", "topic": topic or cleaned_clause}
+            return {"clause": clause, "polarity": "positive", "topic": topic or cleaned_clause, "aliases": []}
+        return {"clause": clause, "polarity": "unclear", "topic": topic or cleaned_clause, "aliases": []}
 
     def _postprocess_preference_classifications(self, classifications: list[dict], preset_topics: list[str]) -> dict:
         positive_candidates: list[str] = []
         negative_candidates: list[str] = []
+        topic_aliases: dict[str, list[str]] = {}
         for item in classifications:
             clause = self._strip_clause_noise(str(item.get("clause") or ""))
             polarity = str(item.get("polarity") or "unclear").strip().lower()
@@ -2523,6 +2628,9 @@ class MockDecisionEngine(DecisionEngine):
                 if not self._is_plausible_bare_topic(topic):
                     continue
                 polarity = "positive"
+            raw_aliases = [str(a).strip().lower() for a in list(item.get("aliases") or []) if str(a).strip()]
+            if raw_aliases:
+                topic_aliases[topic.lower()] = raw_aliases
             candidates = self._split_topic_list(topic)
             if polarity == "negative":
                 negative_candidates.extend(candidates)
@@ -2532,9 +2640,17 @@ class MockDecisionEngine(DecisionEngine):
         positive_topics = self._canonicalize_topics(positive_candidates, preset_topics)
         negative_topics = self._canonicalize_topics(negative_candidates, preset_topics)
         suppressed = {topic.lower() for topic in negative_topics}
+
+        aliases_by_topic: dict[str, list[str]] = {}
+        for topic in positive_topics + negative_topics:
+            key = topic.lower()
+            if key in topic_aliases:
+                aliases_by_topic[key] = topic_aliases[key]
+
         return {
             "positive_topics": [topic for topic in positive_topics if topic.lower() not in suppressed],
             "negative_topics": negative_topics,
+            "topic_aliases": aliases_by_topic,
         }
 
 
@@ -2750,6 +2866,8 @@ class OpenAIDecisionEngine(MockDecisionEngine):
             prompt_version=UNIFIED_EXTRACTION_PROMPT_VERSION,
             use_session=False,
             inject_conversation_context=True,
+            model_override="gpt-5.4",
+            timeout_override_sec=180,
         )
         # Convert event outputs to ExtractedEvent dataclass instances (same as extract_events)
         events: list[ExtractedEvent] = []
@@ -3006,7 +3124,22 @@ class OpenAIDecisionEngine(MockDecisionEngine):
         timezone_hint: str = "UTC",
         evaluation_datetime_utc: str = "",
         document_understanding: dict | None = None,
+        preference_match_decisions: list[dict] | None = None,
     ) -> list[dict]:
+        _default_pref = {
+            "preference_match": False,
+            "matched_positive_topics": [],
+            "suppressed_match": False,
+            "matched_suppressed_topics": [],
+        }
+        events_payload = []
+        for index, event in enumerate(extracted_events):
+            event_payload = self._serialize_routing_event(index + 1, event)
+            if preference_match_decisions and index < len(preference_match_decisions):
+                event_payload["preference_match_result"] = preference_match_decisions[index]
+            else:
+                event_payload["preference_match_result"] = dict(_default_pref)
+            events_payload.append(event_payload)
         parsed = self._run_agent(
             agent_name="event_routing",
             system_prompt=EVENT_ROUTING_SYSTEM_PROMPT,
@@ -3024,7 +3157,7 @@ class OpenAIDecisionEngine(MockDecisionEngine):
                         "children": [self._serialize_routing_child(child) for child in children],
                     },
                     "document_understanding": compact_document_understanding_for_downstream(document_understanding),
-                    "events": [self._serialize_routing_event(index + 1, event) for index, event in enumerate(extracted_events)],
+                    "events": events_payload,
                 },
                 ensure_ascii=True,
                 indent=2,
@@ -3043,9 +3176,18 @@ class OpenAIDecisionEngine(MockDecisionEngine):
         positive_preference_topics: list[str],
         suppressed_priority_topics: list[str],
         document_understanding: dict | None = None,
+        topic_aliases: dict[str, list[str]] | None = None,
     ) -> list[dict]:
         if not extracted_events:
             return []
+        positive_topics_with_aliases = [
+            {"label": topic, "aliases": (topic_aliases or {}).get(topic.lower(), [])}
+            for topic in (positive_preference_topics or [])
+        ]
+        suppressed_topics_with_aliases = [
+            {"label": topic, "aliases": (topic_aliases or {}).get(topic.lower(), [])}
+            for topic in (suppressed_priority_topics or [])
+        ]
         parsed = self._run_agent(
             agent_name="preference_match",
             system_prompt=PREFERENCE_MATCH_SYSTEM_PROMPT,
@@ -3053,7 +3195,9 @@ class OpenAIDecisionEngine(MockDecisionEngine):
                 {
                     "household_context": {
                         "positive_preference_topics": list(positive_preference_topics or []),
+                        "positive_topics_with_aliases": positive_topics_with_aliases,
                         "suppressed_priority_topics": list(suppressed_priority_topics or []),
+                        "suppressed_topics_with_aliases": suppressed_topics_with_aliases,
                     },
                     "document_understanding": compact_document_understanding_for_downstream(document_understanding),
                     "events": [self._serialize_routing_event(index + 1, event) for index, event in enumerate(extracted_events)],
@@ -3131,15 +3275,24 @@ class OpenAIDecisionEngine(MockDecisionEngine):
         inject_conversation_context: bool,
         agent_context: Any = None,
         tools: list[Any] | None = None,
+        reasoning_effort_override: str | None = None,
+        model_override: str | None = None,
+        timeout_override_sec: int | None = None,
     ) -> Any:
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY is not configured")
         scope = self._conversation_scope_var.get()
+        effective_model = model_override or self.model
+        model_settings = (
+            self._agent_model_settings(reasoning_effort=reasoning_effort_override)
+            if reasoning_effort_override
+            else self._agent_model_settings()
+        )
         agent = Agent(
             name=agent_name,
             instructions=system_prompt,
-            model=self.model,
-            model_settings=self._agent_model_settings(),
+            model=effective_model,
+            model_settings=model_settings,
             output_type=output_type,
             tools=list(tools or []),
         )
@@ -3159,7 +3312,7 @@ class OpenAIDecisionEngine(MockDecisionEngine):
         )
         run_config = RunConfig(
             model_provider=self._new_model_provider(),
-            model_settings=self._agent_model_settings(),
+            model_settings=model_settings,
             workflow_name=self._agent_workflow_name(scope=scope, agent_name=agent_name),
             group_id=scope.group_id if scope else None,
             trace_metadata=trace_metadata,
@@ -3180,7 +3333,11 @@ class OpenAIDecisionEngine(MockDecisionEngine):
                     agent_context=agent_context,
                     run_config=run_config,
                     session=session,
-                    timeout_seconds=self._runner_wall_clock_timeout_seconds(),
+                    timeout_seconds=(
+                        float(max(timeout_override_sec + 10, 30))
+                        if timeout_override_sec
+                        else self._runner_wall_clock_timeout_seconds()
+                    ),
                 )
                 break
             except Exception as exc:
@@ -3259,10 +3416,10 @@ class OpenAIDecisionEngine(MockDecisionEngine):
             use_responses=True,
         )
 
-    def _agent_model_settings(self) -> ModelSettings:
+    def _agent_model_settings(self, reasoning_effort: str | None = None) -> ModelSettings:
         if self.model.startswith("gpt-5"):
             return ModelSettings(
-                reasoning=Reasoning(effort=self.reasoning_effort),
+                reasoning=Reasoning(effort=reasoning_effort or self.reasoning_effort),
                 store=self.store_responses,
                 truncation="auto",
                 include_usage=True,

@@ -357,10 +357,18 @@ def _prefilter_summary_context(
         applies_to = _applies_to_for_event(event, child_context)
         matched_system_defaults = _matched_system_defaults(event, applies_to, child_context, enabled_system_defaults)
         routed_positive_matches = _dedupe_strings(
-            [str(item).strip() for item in list(outcome.get("matched_positive_topics") or []) if str(item).strip()]
+            [str(item).strip() for item in list(
+                outcome.get("matched_positive_topics")
+                or relevancy_evidence.get("matched_positive_topics")
+                or []
+            ) if str(item).strip()]
         )
         routed_suppressed_matches = _dedupe_strings(
-            [str(item).strip() for item in list(outcome.get("matched_suppressed_topics") or []) if str(item).strip()]
+            [str(item).strip() for item in list(
+                outcome.get("matched_suppressed_topics")
+                or relevancy_evidence.get("matched_suppressed_topics")
+                or []
+            ) if str(item).strip()]
         )
         matched_user_priorities = (
             routed_positive_matches

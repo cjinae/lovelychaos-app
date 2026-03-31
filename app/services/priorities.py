@@ -136,9 +136,10 @@ def canonicalize_priority_topic(value: str) -> str:
     return _humanize_priority_label(label)
 
 
-def _normalize_topic_objects(values: Iterable[str]) -> list[dict]:
+def _normalize_topic_objects(values: Iterable[str], topic_aliases: dict[str, list[str]] | None = None) -> list[dict]:
     seen: set[str] = set()
     topics: list[dict] = []
+    alias_map = topic_aliases or {}
     for value in values:
         label = canonicalize_priority_topic(value)
         if not label:
@@ -147,7 +148,11 @@ def _normalize_topic_objects(values: Iterable[str]) -> list[dict]:
         if not key or key in seen:
             continue
         seen.add(key)
-        topics.append({"key": key, "label": label})
+        aliases = alias_map.get(label.lower(), [])
+        topic_obj: dict = {"key": key, "label": label}
+        if aliases:
+            topic_obj["aliases"] = aliases
+        topics.append(topic_obj)
     return topics
 
 
@@ -159,12 +164,17 @@ def _topic_objects_from_value(value: object) -> list[dict]:
     if not isinstance(value, list):
         return []
     labels: list[str] = []
+    existing_aliases: dict[str, list[str]] = {}
     for item in value:
         if isinstance(item, dict):
-            labels.append(str(item.get("label") or item.get("key") or ""))
+            label = str(item.get("label") or item.get("key") or "")
+            labels.append(label)
+            aliases = list(item.get("aliases") or [])
+            if aliases and label:
+                existing_aliases[label.lower()] = aliases
         else:
             labels.append(str(item))
-    return _normalize_topic_objects(labels)
+    return _normalize_topic_objects(labels, existing_aliases or None)
 
 
 def _migrate_legacy_priority_structure(structured_json: dict | None) -> dict:
@@ -251,6 +261,23 @@ def effective_suppressed_priority_topics(structured_json: dict | None) -> list[d
         if str(item.get("behavior") or "").strip().lower() == "suppress"
     ]
     return _normalize_topic_objects([item["label"] for item in parsed] + command_suppressed)
+
+
+def _collect_topic_aliases(structured: dict) -> dict[str, list[str]]:
+    """Build a map of topic label (lowercase) -> aliases from all stored topic objects."""
+    alias_map: dict[str, list[str]] = {}
+    for source_key in ("parsed_priority_topics", "parsed_suppressed_topics", "selected_priority_topics"):
+        for item in list((structured or {}).get(source_key) or []):
+            if not isinstance(item, dict):
+                continue
+            aliases = list(item.get("aliases") or [])
+            if aliases:
+                label = str(item.get("label") or "").strip().lower()
+                if label:
+                    existing = alias_map.get(label, [])
+                    merged = list(dict.fromkeys(existing + aliases))
+                    alias_map[label] = merged
+    return alias_map
 
 
 def sync_effective_priority_structure(structured_json: dict | None) -> dict:
@@ -413,6 +440,7 @@ def load_priority_preferences(db: Session, household_id: int) -> dict:
         "user_priority_topics": [item["label"] for item in effective],
         "effective_suppressed_priority_topics": [item["label"] for item in effective_suppressed_priority_topics(structured)],
         "suppressed_priority_topics": [item["label"] for item in effective_suppressed_priority_topics(structured)],
+        "topic_aliases": _collect_topic_aliases(structured),
         "command_written_preferences": command_prefs,
     }
 
@@ -431,6 +459,7 @@ def save_priority_preferences(
     admin_override_active: bool | None = None,
     parse_status: str = "success",
     parse_error: str = "",
+    topic_aliases: dict[str, list[str]] | None = None,
 ) -> PreferenceProfile:
     profile = db.scalar(select(PreferenceProfile).where(PreferenceProfile.household_id == household_id))
     assert profile is not None
@@ -438,8 +467,8 @@ def save_priority_preferences(
 
     structured = _migrate_legacy_priority_structure(profile.structured_json)
     structured["selected_priority_topics"] = _normalize_topic_objects(user_priority_topics)
-    structured["parsed_priority_topics"] = _normalize_topic_objects(parsed_priority_topics or [])
-    structured["parsed_suppressed_topics"] = _normalize_topic_objects(parsed_suppressed_topics or [])
+    structured["parsed_priority_topics"] = _normalize_topic_objects(parsed_priority_topics or [], topic_aliases)
+    structured["parsed_suppressed_topics"] = _normalize_topic_objects(parsed_suppressed_topics or [], topic_aliases)
     if admin_priority_topics is not None:
         structured["admin_priority_topics"] = _normalize_topic_objects(admin_priority_topics)
     if admin_suppressed_topics is not None:
