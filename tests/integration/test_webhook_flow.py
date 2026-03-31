@@ -135,14 +135,14 @@ def test_inbound_persists_source_before_thread_document_upload(client, session_f
 
 def test_inbound_commits_user_turn_before_llm_extraction(client, session_factory, monkeypatch):
     import app.main as main_module
-    from app.services.agent_threads import email_session_id
+    from app.services.agent_threads import household_session_id
 
     payload = dict(PAYLOAD_CLEAN)
     payload["provider_event_id"] = "evt-session-commit"
     payload["provider_message_id"] = "msg-session-commit"
     payload["subject"] = "Frankland user-turn commit"
 
-    session_id = email_session_id(household_id=1, thread_key=payload["provider_message_id"])
+    session_id = household_session_id(household_id=1)
     observed = {"checked": False}
     original_extract = main_module.engine_llm.extract_events
 
@@ -154,7 +154,7 @@ def test_inbound_commits_user_turn_before_llm_extraction(client, session_factory
                 )
             )
             assert items
-            assert any("Email subject" in str(item.payload or {}) for item in items)
+            assert any("via email" in str(item.payload or {}) for item in items)
         observed["checked"] = True
         return original_extract(*args, **kwargs)
 

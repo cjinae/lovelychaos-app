@@ -34,8 +34,9 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-addopts = "-q"
+addopts = "-q -m 'not e2e'"
 testpaths = ["tests"]
+markers = ["e2e: end-to-end tests requiring real LLM (LOVELYCHAOS_E2E_LLM=1)"]
 
 [tool.ruff]
 line-length = 100
