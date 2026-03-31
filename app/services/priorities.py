@@ -21,6 +21,16 @@ SYSTEM_DEFAULT_PRIORITY_CONFIG = {
         "description": "Events and info that match the grades of children in the household.",
         "examples": ["Grade 1 trip", "Primary concert", "JK classroom event"],
     },
+    "report_cards": {
+        "label": "Report cards",
+        "description": "Report card distribution dates and progress reports.",
+        "examples": ["Term 1 report cards", "Progress reports go home", "Report card day"],
+    },
+    "parent_teacher_interviews": {
+        "label": "Parent-teacher interviews",
+        "description": "Parent-teacher conferences, interviews, and meeting nights.",
+        "examples": ["Parent-teacher conferences", "Interview evening", "Parent-teacher night"],
+    },
 }
 
 PRESET_PRIORITY_TOPIC_CONFIG = (
@@ -597,3 +607,33 @@ def topic_matches_text(topic_label: str, *values: str) -> bool:
 def school_closure_matches(*values: str) -> bool:
     haystack = " ".join(str(value or "").strip().lower() for value in values)
     return any(term in haystack for term in SCHOOL_CLOSURE_TERMS)
+
+
+REPORT_CARD_TERMS = (
+    "report card",
+    "report cards",
+    "progress report",
+    "progress reports",
+)
+
+
+def report_card_matches(*values: str) -> bool:
+    haystack = " ".join(str(value or "").strip().lower() for value in values)
+    return any(term in haystack for term in REPORT_CARD_TERMS)
+
+
+PARENT_TEACHER_TERMS = (
+    "parent-teacher",
+    "parent teacher",
+    "parent conference",
+    "parent-teacher conference",
+    "parent-teacher interview",
+    "parent teacher interview",
+    "interview evening",
+    "conference evening",
+)
+
+
+def parent_teacher_matches(*values: str) -> bool:
+    haystack = " ".join(str(value or "").strip().lower() for value in values)
+    return any(term in haystack for term in PARENT_TEACHER_TERMS)

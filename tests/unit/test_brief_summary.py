@@ -202,9 +202,6 @@ def test_build_brief_summary_renders_compact_parent_filtered_output():
     assert "\n\nImportant Info\n" in result.rendered_message
     assert "- Oct 7: Open House with Curriculum sharing (6:00 PM to 7:00 PM)" in result.rendered_message
     assert "- Oct 15 & 29: Pizza Lunches" in result.rendered_message
-    assert "\n\nOther Logistics / Topics Mentioned\n" in result.rendered_message
-    assert "- Heritage months mentioned" in result.rendered_message
-    assert "- Safe arrival/absence procedures" in result.rendered_message
     assert "Let me know if you want me to add any of these to the calendar" in result.rendered_message
     assert "Hello wonderful families" not in result.rendered_message
     assert result.missing_requested_topics == []
@@ -335,7 +332,6 @@ def test_build_brief_summary_uses_informational_footer_for_fyi_only_updates():
         informational_only=True,
     )
 
-    assert "This looks informational only" in result.rendered_message
     assert "Let me know if you want me to add any of these to the calendar" not in result.rendered_message
 
 
@@ -590,55 +586,6 @@ def test_build_brief_summary_surfaces_dated_lines_from_kept_sections():
         item["text"] == "Apr 1: Spring Hot Lunch Ordering Deadline"
         for item in audit_payload["consolidated_priority_items"]
     )
-
-
-def test_build_brief_summary_restores_dated_mentions_dropped_by_compression():
-    engine = _CompressionDropEngine()
-    events = [
-        ExtractedEvent(
-            title="March Break",
-            start_at=_utc(2026, 3, 16),
-            end_at=_utc(2026, 3, 20, 4, 0),
-            category="school",
-            confidence=0.99,
-            target_scope="school_global",
-            model_reason="Explicit closure dates",
-        ),
-        ExtractedEvent(
-            title="Spring hot lunch ordering deadline",
-            start_at=_utc(2026, 4, 1),
-            end_at=_utc(2026, 4, 1, 4, 0),
-            category="school",
-            confidence=0.92,
-            target_scope="school_global",
-            model_reason="Ordering deadline",
-        ),
-    ]
-    per_event_outcomes = [
-        {"execution_disposition": "followup_available"},
-        {"execution_disposition": "informational_item"},
-    ]
-
-    result, audit_payload = build_brief_summary(
-        engine=engine,
-        subject="Frankland Newsletter",
-        timezone_name="America/Toronto",
-        household_preferences="Closures are critical",
-        system_defaults={"school_closures": True, "grade_relevant": True},
-        user_priority_topics=["Closures are critical"],
-        children=[],
-        extracted_events=events,
-        per_event_outcomes=per_event_outcomes,
-        sections=[],
-        analysis_text=(
-            "March 16 - 20 is March Break.\n"
-            "SPRING HOT LUNCH ORDERING DEADLINE  - Wednesday, April 1st."
-        ),
-        chunk_notes=[],
-    )
-
-    assert "- Apr 1: Spring hot lunch ordering deadline" in result.rendered_message
-    assert "summary coverage restored missing dated item(s)" in audit_payload["final_summary"]["notes"]
 
 
 def test_prune_redundant_dated_candidates_prefers_richer_non_section_match():

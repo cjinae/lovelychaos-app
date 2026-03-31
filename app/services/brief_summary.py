@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from app.services.content_analysis import AnalysisSection
 from app.services.llm import DecisionEngine, ExtractedEvent
-from app.services.priorities import school_closure_matches, topic_matches_text
+from app.services.priorities import parent_teacher_matches, report_card_matches, school_closure_matches, topic_matches_text
 from app.services.school_knowledge import retrieve_knowledge_context
 
 
@@ -49,14 +49,8 @@ SUMMARY_MENTION_TERMS = (
     "deadline",
     "reminder",
 )
-SUMMARY_IGNORE_TERMS = (
-    "email address change window",
-    "volunteer setup shift",
-    "volunteer cleanup shift",
-    "event-running shift",
-    "donation drop-off window",
-    "drop-off window",
-)
+
+
 SUMMARY_OVERLAP_STOPWORDS = {
     "a",
     "an",
@@ -286,9 +280,6 @@ def build_brief_summary(
             combined_notes,
             timezone_name,
         )
-    compressed_summary = _ensure_dated_candidate_coverage(compressed_summary, merged_candidates, timezone_name)
-    compressed_summary = _normalize_compressed_summary(compressed_summary, timezone_name)
-    compressed_summary = _upgrade_rendered_summary_with_candidates(compressed_summary, merged_candidates, timezone_name)
     compressed_summary = _normalize_compressed_summary(compressed_summary, timezone_name)
 
     if informational_only is None:
@@ -519,7 +510,7 @@ def _document_understanding_candidates(
     positive_topics = list(user_priority_topics or [])
     suppressed_topics = list(suppressed_priority_topics or [])
     candidates: list[dict] = []
-    for bucket_name, priority in (("actionable_topics", "important"), ("informational_topics", "mentioned")):
+    for bucket_name in ("actionable_topics", "informational_topics"):
         for index, topic in enumerate(list(document_understanding.get(bucket_name) or []), start=1):
             if not isinstance(topic, dict):
                 continue
@@ -536,10 +527,11 @@ def _document_understanding_candidates(
                 text = f"{text}: {why_it_matters}"
             matched_user = [t for t in positive_topics if topic_matches_text(t, title, why_it_matters)]
             matched_suppressed = [t for t in suppressed_topics if topic_matches_text(t, title, why_it_matters)]
+            effective_priority = "important" if matched_user else "mentioned"
             candidates.append(
                 {
                     "text": text,
-                    "consolidated_priority": priority,
+                    "consolidated_priority": effective_priority,
                     "matched_system_defaults": [],
                     "matched_user_priorities": matched_user,
                     "matched_suppressed_topics": matched_suppressed,
@@ -592,6 +584,10 @@ def _matched_system_defaults(
         matches.append("school_closures")
     if "grade_relevant" in enabled_system_defaults and _grade_relevant_match(event, applies_to, child_context):
         matches.append("grade_relevant")
+    if "report_cards" in enabled_system_defaults and report_card_matches(*text_values):
+        matches.append("report_cards")
+    if "parent_teacher_interviews" in enabled_system_defaults and parent_teacher_matches(*text_values):
+        matches.append("parent_teacher_interviews")
     return matches
 
 
@@ -629,23 +625,17 @@ def _determine_consolidated_priority(
     matched_user_priorities: list[str],
     matched_suppressed_priorities: list[str],
 ) -> str:
-    normalized = _normalize_text(f"{event.title} {event.model_reason}")
-    if any(term in normalized for term in SUMMARY_IGNORE_TERMS):
-        return "ignore"
     if matched_suppressed_priorities and not matched_system_defaults:
         return "ignore"
     if matched_system_defaults or matched_user_priorities:
         return "important"
-    if execution_disposition in {"create_event", "followup_available", "informational_item"} and _is_mention_worthy(event):
+    if execution_disposition == "ignore":
+        return "ignore"
+    if execution_disposition in {"create_event", "followup_available", "informational_item"}:
+        return "mentioned"
+    if not execution_disposition:
         return "mentioned"
     return "ignore"
-
-
-def _is_mention_worthy(event: ExtractedEvent) -> bool:
-    normalized = _normalize_text(f"{event.title} {event.category} {event.model_reason}")
-    if any(term in normalized for term in SUMMARY_IGNORE_TERMS):
-        return False
-    return any(term in normalized for term in SUMMARY_MENTION_TERMS)
 
 
 def _deterministic_candidates(
@@ -681,55 +671,8 @@ def _deterministic_candidates(
 
     candidates.extend(_dated_candidates_from_sections(kept_sections, timezone_name, reference_datetime_hint))
 
-    normalized_text = _normalize_text(analysis_text)
-    topic_patterns = [
-        ("Safe arrival/absence procedures", ("safe arrival", "absence", "attendance")),
-        ("Weather-appropriate clothing", ("weather", "clothing", "cold weather")),
-        ("Volunteering or event support", ("volunteer", "wristband")),
-        ("School council updates", ("school council", "executive results")),
-        ("Fundraising or donation updates", ("donation", "fundraising", "fundraiser", "food drive", "holiday hamper")),
-        ("Heritage months mentioned", ("heritage month", "heritage months")),
-        ("Awareness months mentioned", ("awareness month", "awareness months")),
-    ]
-    for label, tokens in topic_patterns:
-        if all(token not in normalized_text for token in tokens):
-            continue
-        candidates.append(
-            {
-                "text": label,
-                "consolidated_priority": "mentioned",
-                "matched_system_defaults": [],
-                "matched_user_priorities": [],
-                "source_refs": [f"topic:{_normalize_text(label).replace(' ', '_')}"],
-                "applies_to": [],
-                "date_sort_key": None,
-                "has_date": False,
-                "reason": "deterministic_topic_match",
-            }
-        )
-
     candidates.extend(_rescue_candidates_from_sections(rescued_sections, title_hint, timezone_name))
 
-    for topic in user_priority_topics:
-        normalized_topic = _normalize_text(topic)
-        if not normalized_topic or normalized_topic not in normalized_text:
-            continue
-        if any(normalized_topic in _normalize_text(item.get("text", "")) for item in candidates):
-            continue
-        if normalized_topic and normalized_topic in normalized_text:
-            candidates.append(
-                {
-                    "text": topic,
-                    "consolidated_priority": "mentioned",
-                    "matched_system_defaults": [],
-                    "matched_user_priorities": [topic],
-                    "source_refs": [f"preference:{normalized_topic.replace(' ', '_')}"],
-                    "applies_to": [],
-                    "date_sort_key": None,
-                    "has_date": False,
-                    "reason": "requested_topic_found",
-                }
-            )
     merged = _prune_redundant_dated_candidates(_merge_summary_candidates([], candidates))
     return _filter_suppressed_candidates(merged, suppressed_priority_topics)
 

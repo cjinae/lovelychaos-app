@@ -1362,13 +1362,6 @@ def _route_extracted_events(
 ) -> list[dict]:
     if not extracted_events:
         return []
-    fallback_decisions = _legacy_route_extracted_events(
-        extracted_events=extracted_events,
-        children=children,
-        priority_preferences=priority_preferences,
-        sender_email_hint=sender_email_hint,
-        sender_name_hint=sender_name_hint,
-    )
     preference_match_decisions = _match_extracted_event_preferences(
         extracted_events=extracted_events,
         priority_preferences=priority_preferences,
@@ -1376,6 +1369,13 @@ def _route_extracted_events(
     )
     route_events = getattr(engine_llm, "route_events", None)
     if not callable(route_events):
+        fallback_decisions = _legacy_route_extracted_events(
+            extracted_events=extracted_events,
+            children=children,
+            priority_preferences=priority_preferences,
+            sender_email_hint=sender_email_hint,
+            sender_name_hint=sender_name_hint,
+        )
         if not preference_match_decisions:
             return fallback_decisions
         return [
@@ -1406,6 +1406,13 @@ def _route_extracted_events(
     if decisions and len(decisions) != len(extracted_events):
         raise ValueError("Event routing decision count mismatch")
     if not decisions:
+        fallback_decisions = _legacy_route_extracted_events(
+            extracted_events=extracted_events,
+            children=children,
+            priority_preferences=priority_preferences,
+            sender_email_hint=sender_email_hint,
+            sender_name_hint=sender_name_hint,
+        )
         if not preference_match_decisions:
             return fallback_decisions
         return [
@@ -1416,6 +1423,13 @@ def _route_extracted_events(
             )
             for candidate, fallback, match in zip(extracted_events, fallback_decisions, preference_match_decisions)
         ]
+    fallback_decisions = _legacy_route_extracted_events(
+        extracted_events=extracted_events,
+        children=children,
+        priority_preferences=priority_preferences,
+        sender_email_hint=sender_email_hint,
+        sender_name_hint=sender_name_hint,
+    )
     return [
         _apply_routing_guardrails(
             proposed=_overlay_preference_match_decision(dict(proposed or {}), preference_match),

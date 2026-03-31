@@ -91,7 +91,7 @@ Forwarded email header lines (`From:`, `Date:`, `Subject:`, `To:`) are email tra
 </inference_rules>
 
 <field_rules>
-- `preference_match` should reflect whether the event appears relevant to the household preferences, but it must not control whether the event is emitted.
+- Set `preference_match` to false. Preference matching is handled by a dedicated downstream step with richer context.
 - Keep `model_reason` concise and specific.
 - Keep `email_level_notes` concise and use null when nothing noteworthy needs to be added.
 - For date-only closures, holidays, PA Days, photo days, or other all-day school calendar items, keep them as date-only facts and do not invent a time window from nearby bell schedules or daily timetables.
@@ -140,6 +140,10 @@ Interpret whether the current user-authored message is issuing a supported Lovel
 - `move pizza day to Friday` -> `update`
 - `when is pizza day this week` -> `more_info`
 - `summarize this` -> `more_info` with `execution_strategy="semantic"`
+- Freeform add requests are valid `add` commands even when the event does not come from a prior email or document. Examples:
+  - `add soccer practice Tuesday at 3pm` -> `add` with `execution_strategy="deterministic"`
+  - `put dentist appointment on April 5 at 10am` -> `add` with `execution_strategy="deterministic"`
+  - `add school picture day March 20` -> `add` with `execution_strategy="deterministic"`
 - Use `execution_strategy="deterministic"` for concrete mutation commands like add, update, delete, remind, and set_preference.
 - Use `execution_strategy="semantic"` for explanation, lookup, or summarization requests like more_info or summarize-this requests.
 - Use `execution_strategy="none"` when returning `action="none"`.
@@ -228,7 +232,9 @@ Use the parsed command, the current message, household context, session history,
 <tool_rules>
 - Use preference tools for preference reads and preference changes.
 - Use calendar tools for calendar lookup, create, update, delete, and reminder actions when the request is supported and sufficiently grounded.
-- For add requests, use the high-level `add_calendar_event_from_context_tool` so the app can resolve the event safely from session, thread, and document context.
+- For add requests that reference a previously seen event (e.g., "add that pizza day thing"), use `add_calendar_event_from_context_tool` with only the `query` parameter so the app can resolve it from session, thread, and document context.
+- For freeform add requests where the user provides an event title and date/time in their message (e.g., "add soccer practice Tuesday at 3pm"), extract the details yourself and call `add_calendar_event_from_context_tool` with explicit `title`, `start_at_iso`, and `end_at_iso` parameters in ISO-8601 format. Use the household timezone and current date from the request context to resolve relative dates like "Tuesday" or "next Friday". If no end time is given, default to 1 hour after start. If no time is given (just a date), set `all_day=True` and use that date for both start and end.
+- If a freeform add request is missing a title or any date/time information, return a clarification asking for the missing details rather than guessing.
 - Prefer tool calls over guessing whenever a tool can verify or execute the request.
 - Do not mutate preferences or calendar state unless the user clearly asked for that mutation.
 - If the request is ambiguous, unsupported, or missing a safe target, do not guess. Return a concise clarification response instead.
@@ -387,7 +393,7 @@ Step 3 — Extract every event:
   - Normalize timestamps to ISO-8601 UTC when date and time are present.
   - For date-only items (closures, holidays, PA Days), keep as date-only — do not invent times.
   - If date or time is missing or unclear, still emit the event with null fields.
-  - Set `preference_match` based on relevance to household preferences, but emit the event regardless.
+  - Set `preference_match` to false. Preference matching is handled by a dedicated downstream step with richer context.
 
 Step 4 — Extract every informational item:
   For each non-calendar topic worth surfacing (awareness items, school news, program announcements, community info, heritage/cultural observances, resource shares):
@@ -504,7 +510,7 @@ Consolidate the supplied items into one final relevance judgment per item.
 </allowed_sources>
 
 <priority_rules>
-- `important` means the family should see this prominently.
+- `important` means the item matches a supplied system default (school closures, grade-relevant) or a supplied user priority topic. Only these items should be `important`. Do not promote items to `important` based on general usefulness or actionability alone.
 - `mentioned` means include it only as a compressed mention.
 - `ignore` means drop it from the final summary.
 - School closures and grade-relevant items should usually stay `important` when supported.
@@ -3310,8 +3316,13 @@ class OpenAIDecisionEngine(MockDecisionEngine):
                 }
             )
         )
+        model_provider = (
+            self._new_model_provider(timeout_sec=timeout_override_sec)
+            if timeout_override_sec
+            else self._new_model_provider()
+        )
         run_config = RunConfig(
-            model_provider=self._new_model_provider(),
+            model_provider=model_provider,
             model_settings=model_settings,
             workflow_name=self._agent_workflow_name(scope=scope, agent_name=agent_name),
             group_id=scope.group_id if scope else None,
@@ -3402,17 +3413,17 @@ class OpenAIDecisionEngine(MockDecisionEngine):
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
-    def _new_openai_client(self) -> AsyncOpenAI:
+    def _new_openai_client(self, timeout_sec: int | None = None) -> AsyncOpenAI:
         return AsyncOpenAI(
             api_key=self.api_key or None,
             base_url=self.base_url,
-            timeout=self.timeout_sec,
+            timeout=timeout_sec or self.timeout_sec,
             max_retries=0,
         )
 
-    def _new_model_provider(self) -> OpenAIProvider:
+    def _new_model_provider(self, timeout_sec: int | None = None) -> OpenAIProvider:
         return OpenAIProvider(
-            openai_client=self._new_openai_client(),
+            openai_client=self._new_openai_client(timeout_sec=timeout_sec),
             use_responses=True,
         )
 

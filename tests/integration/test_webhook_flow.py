@@ -425,7 +425,26 @@ def test_fyi_only_teacher_email_uses_informational_footer(client, db_session, mo
 
     class _Engine:
         def extract_events(self, *_args, **_kwargs):
-            return {"events": [], "email_level_notes": None}
+            from app.services.llm import ExtractedEvent
+
+            return {
+                "events": [
+                    ExtractedEvent(
+                        title="Safe arrival reminder",
+                        start_at=None,
+                        end_at=None,
+                        category="general",
+                        confidence=0.8,
+                        target_scope="school_global",
+                        mentioned_names=[],
+                        mentioned_schools=[],
+                        target_grades=[],
+                        preference_match=False,
+                        model_reason="Teacher note about safe arrival and absence procedures.",
+                    ),
+                ],
+                "email_level_notes": None,
+            }
 
         def extract_summary_candidates(self, _summary_context):
             raise RuntimeError("force deterministic summary fallback")
