@@ -23,6 +23,10 @@ DbSessionFactory = Callable[[], OrmSession]
 _MESSAGE_ID_PATTERN = re.compile(r"<[^>]+>")
 
 
+def household_session_id(*, household_id: int) -> str:
+    return f"household:{household_id}"
+
+
 def email_session_id(*, household_id: int, thread_key: str) -> str:
     return f"email:{household_id}:{thread_key}"
 
@@ -171,6 +175,55 @@ def load_thread_documents(db: OrmSession, *, household_id: int, thread_key: str)
                 openai_file_id=row.openai_file_id,
             )
         )
+    return documents
+
+
+def load_recent_household_documents(
+    db: OrmSession,
+    *,
+    household_id: int,
+    limit: int = 3,
+    max_age_days: int = 7,
+) -> list[ThreadDocumentContext]:
+    from datetime import datetime, timedelta, timezone as tz
+
+    cutoff = datetime.now(tz.utc) - timedelta(days=max_age_days)
+    rows = list(
+        db.scalars(
+            select(ThreadDocument)
+            .where(
+                ThreadDocument.household_id == household_id,
+                ThreadDocument.created_at >= cutoff,
+            )
+            .order_by(ThreadDocument.created_at.desc())
+            .limit(limit * 2)
+        )
+    )
+    documents: list[ThreadDocumentContext] = []
+    seen: set[str] = set()
+    for row in rows:
+        key = json.dumps(
+            {
+                "filename": row.filename,
+                "content_type": row.content_type,
+                "source_url": row.source_url,
+                "text_hash": _stable_text_hash(row.extracted_text or ""),
+            },
+            sort_keys=True,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        documents.append(
+            ThreadDocumentContext(
+                filename=row.filename,
+                content_type=row.content_type,
+                extracted_text=row.extracted_text or "",
+                openai_file_id=row.openai_file_id,
+            )
+        )
+        if len(documents) >= limit:
+            break
     return documents
 
 

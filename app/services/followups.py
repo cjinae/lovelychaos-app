@@ -53,6 +53,7 @@ def load_active_followup_context(
     household_id: int,
     response_channel: str,
     thread_or_conversation_key: str | None = None,
+    cross_channel: bool = False,
 ) -> Optional[FollowupContext]:
     now = datetime.now(timezone.utc)
     base_query = (
@@ -70,7 +71,19 @@ def load_active_followup_context(
         )
         if exact_match is not None:
             return exact_match
-    return db.scalar(base_query)
+    channel_match = db.scalar(base_query)
+    if channel_match is not None:
+        return channel_match
+    if cross_channel:
+        return db.scalar(
+            select(FollowupContext)
+            .where(
+                FollowupContext.household_id == household_id,
+                FollowupContext.expires_at >= now,
+            )
+            .order_by(FollowupContext.created_at.desc())
+        )
+    return None
 
 
 def load_recent_followup_contexts(db: Session, *, household_id: int, limit: int = 5) -> list[FollowupContext]:
