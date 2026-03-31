@@ -30,13 +30,19 @@ The current product is no longer a "Phase 1" stub. The codebase now includes liv
   - holds ambiguous or incomplete items for follow-up instead of guessing
   - supports add, delete, and reminder workflows
   - supports mock and live Google Calendar providers
+- Unified "one brain" cross-channel architecture:
+  - email and SMS share a single household-scoped agent session (`household:{id}`), so the assistant has full conversational context regardless of which channel a message came from
+  - followup context created from email digests is accessible to SMS via cross-channel fallback, and vice versa
+  - recent email attachments and thread documents are available to the SMS agent (last 7 days, up to 3 documents)
+  - session items are tagged with `[via sms]` or `[via email]` so the agent knows the source channel
+  - channel-aware response formatting: SMS responses are kept concise (<320 chars), email responses can include more detail
 - Conversational follow-up:
   - email and SMS can request `add`, `more_info`, `delete`, `remind`, `update`, and `set_preference`
   - `more_info` replies should feel assistant-like and grounded, paraphrasing the school update instead of copying source text back to the parent
   - SMS keeps short-lived numbered disambiguation state when a reply could refer to multiple recent items
   - follow-up context is persisted so later replies can resolve "this", topic names, or numbered selections
-  - per-thread conversation history is stored in the database and available to the command execution agent across requests
-  - PDF and attachment text is persisted per email thread so follow-up messages can reference attachment content without re-downloading
+  - conversation history is stored in a unified household session and available to the command execution agent across requests and channels
+  - PDF and attachment text is persisted per email thread and accessible from SMS so follow-up messages can reference attachment content without re-downloading
 - Operator surfaces:
   - onboarding flow for family profile, children, schools, priority profile, and calendar connection
   - admin console for settings, children, teacher contacts, preferences, calendar binding, digests, notifications, and inbound activity
@@ -233,6 +239,18 @@ Twilio inbound SMS webhook:
 
 ```bash
 make ci
+```
+
+Cross-channel tests (unified brain validation):
+
+```bash
+python3 -m pytest tests/cross_channel/ -v
+```
+
+End-to-end tests with real LLM (opt-in):
+
+```bash
+LOVELYCHAOS_E2E_LLM=1 python3 -m pytest -m e2e -v
 ```
 
 See `TESTING.md` for suite definitions and merge policy.

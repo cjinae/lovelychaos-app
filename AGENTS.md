@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Leadership
-- Jina Lee is the CTO of this project.
+- Jinae Lee is the CTO of this project.
 - For project background, strategy, or source-of-truth context, refer to [`lovelychaos.docx`](/Users/jinaelee/projects/lovelychaos/lovelychaos.docx).
 
 ## Local Gmail Test Account
@@ -42,7 +42,7 @@
 - Prefer the OpenAI Responses API for all new and updated model integrations in this repo.
 - Do not add new Chat Completions integrations when the same behavior is available through Responses API.
 - When touching OpenAI code, verify the current official OpenAI docs first and keep payloads aligned with the latest Responses API and tracing guidance.
-- The command execution layer uses the `openai_agents` SDK runtime with a SQLAlchemy-backed session store (`DbBackedAgentSession` in `app/services/agent_threads.py`). Session IDs are scoped per email thread key or per SMS household.
+- The command execution layer uses the `openai_agents` SDK runtime with a SQLAlchemy-backed session store (`DbBackedAgentSession` in `app/services/agent_threads.py`). Sessions use a unified household-scoped key (`household:{id}`) so both email and SMS share one conversation timeline.
 - Per-request tracing is configured via `app/services/openai_tracing.py`. Enable with `OPENAI_TRACING_ENABLED=true`.
 
 ## Key Service Modules
@@ -50,11 +50,11 @@
 | Service | Purpose |
 | --- | --- |
 | `app/services/llm.py` | Core LLM decision engine — extraction, command parsing, summary, preference parse |
-| `app/services/agent_threads.py` | Multi-turn session state, thread key resolution, thread document persistence |
+| `app/services/agent_threads.py` | Unified household session state, thread key resolution, thread document persistence, cross-channel document loading |
 | `app/services/add_requests.py` | Calendar add candidate resolution pipeline (explicit, context-based, or full extraction) |
 | `app/services/school_knowledge.py` | Local school communication corpus for extraction context; advisory only |
 | `app/services/openai_tracing.py` | Per-request and per-workflow tracing wrappers for the OpenAI agents SDK |
-| `app/services/followups.py` | Followup context storage and SMS numbered-selection conversation state |
+| `app/services/followups.py` | Followup context storage with cross-channel lookup, SMS numbered-selection conversation state |
 | `app/services/content_analysis.py` | Attachment/PDF download, extraction, and chunking |
 | `app/services/relevancy.py` | Event relevance scoring against household children (name, grade, teacher) |
 | `app/services/priorities.py` | Household preference rules and priority topic matching |

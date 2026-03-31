@@ -1,12 +1,13 @@
 # Claude Workspace Notes
 
 ## Project Leadership
-- Jina Lee is the CTO of this project.
+- Jinae Lee is the CTO of this project.
 - For project background, strategy, or source-of-truth context, refer to [`lovelychaos.docx`](/Users/jinaelee/projects/lovelychaos/lovelychaos.docx).
 
 ## Product Intent
 - LovelyChaos should behave like a helpful assistant for school communication, not just a date/event operator.
 - It should explain what matters in plain language, support conversational follow-ups, and only switch into calendar/operator behavior when the user is clearly asking for scheduling help.
+- The app uses a "one brain" architecture: SMS and email share a unified household session, followup context, and document access. The experience should be like talking to one personal assistant who remembers everything regardless of channel.
 
 ## Gmail Connection
 - This workspace has a local Gmail test connection for `cjinae@gmail.com`.

@@ -39,12 +39,23 @@ These tools use application code for target resolution, tenant checks, Google Ca
 - Summary extraction/compression remains a separate structured-output pipeline.
 - Existing followup-context resolution remains the canonical source for ambiguous `"this"`/`"that one"` add flows.
 
-## Session & Thread State
+## Session & Thread State — Unified "One Brain" Model
 
-- Agent sessions are scoped per email thread key (`thread_key` from message-id/references headers) or per SMS household (`sms:{household_id}`).
-- Session items are persisted in `AgentSessionItem` via `DbBackedAgentSession` in `app/services/agent_threads.py`.
-- PDF and attachment text is persisted as `ThreadDocument` rows so follow-up messages in the same thread can reference attachment content without re-downloading.
+- Agent sessions use a single household-scoped key: `household:{household_id}`. Both email and SMS write to and read from the same session, giving the agent full conversational context across channels.
+- Session items are tagged with `[via sms]` or `[via email]` so the agent knows the source channel of each turn without leaking this to the user.
+- The channel-specific session IDs (`email:{id}:{thread_key}`, `sms:{id}`) still exist as utility functions but are no longer used for agent session routing.
+- Followup context (`FollowupContext`) supports `cross_channel=True` lookup: when the current channel has no matching context, the system falls back to any channel for the household. This lets SMS reference events extracted from email digests.
+- Recent email attachments and thread documents are loaded for the SMS flow via `load_recent_household_documents()` (last 7 days, up to 3 documents), replacing the previous `thread_documents=[]` in the SMS inbound path.
+- PDF and attachment text is persisted as `ThreadDocument` rows and accessible across channels.
 - Tracing is managed per-request via `app/services/openai_tracing.py` using `OPENAI_TRACING_ENABLED`.
+
+### Channel-Aware Response Formatting
+
+The command execution system prompt includes `<channel_rules>` that instruct the agent to:
+- Keep SMS responses under 320 characters, plain language, no formatting
+- Use longer responses with structure for email
+- Treat cross-channel session history as shared context
+- Never reveal channel tags to the user
 
 ## Notes
 
